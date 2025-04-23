@@ -1,0 +1,20 @@
+networks:
+  mysql:
+    name: mysql
+    external: true
+
+services:
+  wordpress-manager:
+    container_name: wordpress-manager
+    build:
+      dockerfile: Dockerfile
+      context: .
+    image: wordpress-manager
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./log:/var/log
+      - ./my.cnf:/etc/my.cnf.d/root.cnf
+    networks:
+      - mysql
+    labels:
+      - "traefik.enable=false"

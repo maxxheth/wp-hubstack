@@ -1,0 +1,59 @@
+services:
+  %DB_NAME%:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: advanced-wordpress:latest  # Define the name of the built image
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    container_name: %DB_NAME%
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - /var/opt/shared/php.ini:/usr/local/etc/php/conf.d/uploads.ini:ro
+      - /var/opt/shared/wp-config.php:/var/www/html/wp-config.php:ro
+      - /var/opt/shared/crons:/crons:ro
+      - /var/opt/shared/.htaccess:/var/www/html/.htaccess
+      - ./robots.txt:/var/www/html/robots.txt:ro
+      - ./www/wp-content/mysql.sql:/data/mysql.sql:ro
+      - ./www/wp-content:/var/www/html/wp-content
+      - /var/opt/shared/mu-plugins:/var/www/html/wp-content/mu-plugins:ro
+      - ./log:/var/www/log
+    user: "33:33"
+    restart: always
+    environment:
+      - PAGER=more
+      - MEMORY_LIMIT=1G
+      - WORDPRESS_DB_HOST=mysql
+      - WORDPRESS_DB_USER=%DB_USER%
+      - WORDPRESS_DB_PASSWORD=%DB_PASS%
+      - WORDPRESS_DB_NAME=%DB_NAME%
+      - WP_HOME=%URL%
+      - WP_DEBUG=true
+      - WP_CACHE=true
+      - WP_DEBUG_LOG=true
+      - WP_DEBUG_DISPLAY=false
+      - DOMAISCRIPT_DEBUG=true
+    networks:
+      - cache
+      - web
+      - mysql
+    labels:
+      - "ci.groups=website,wordpress"
+      - "traefik.http.routers.%DB_NAME%.middlewares=block-sql-files"
+      - "traefik.http.routers.%DB_NAME%.rule=Host(`%DOMAIN%`) || Host(`www.%DOMAIN%`)"
+      - "traefik.http.routers.%DB_NAME%.tls=true"
+      - "traefik.http.routers.%DB_NAME%.tls.certresolver=lets-encrypt"
+      - "traefik.port=80"
+
+networks:
+  cache:
+    name: cache
+    external: true
+  mysql:
+    name: mysql
+    external: true
+  web:
+    name: web
+    external: true
