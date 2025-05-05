@@ -24,7 +24,7 @@ dry_run=false
 TARGET_DIR=""
 TARGET_RESTART_POLICY="" # Policy to set, provided via flag
 process_wp_sites=false # Default: Skip directories containing wp-config.php in their own folder
-WP_CONFIG_SEARCH_DIR="" # Optional directory to search for wp-config.php
+WP_CONFIG_SUBDIR="" # Optional SUBDIRECTORY within each site dir to search for wp-config.php
 # Array to hold exclusion patterns
 declare -a EXCLUDE_PATTERNS=("wordpress-manager" "*cache*")
 # --- End Script Variables ---
@@ -49,7 +49,7 @@ log_dry() {
 error_exit() {
   echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $1" >&2
   # Add usage information to error messages
-  echo "Usage: $0 [--dry-run] [--set-restart-policy <policy_value>] [--wp [--wp-config-dir <path>]] [--exclude-dir <pattern>]... <path_to_installations_directory>" >&2
+  echo "Usage: $0 [--dry-run] [--set-restart-policy <policy_value>] [--wp [--wp-config-dir <subdir_name>]] [--exclude-dir <pattern>]... <path_to_installations_directory>" >&2
   # Add specific instructions if yq is missing
   if [[ "$1" == *"yq"* ]]; then
     echo "" >&2
@@ -80,6 +80,10 @@ check_commands() {
    if ! command -v wget &> /dev/null; then
      # Wget is needed for the suggested install command
      missing_cmds+=("wget")
+  fi
+   if ! command -v realpath &> /dev/null; then
+     # realpath is used for clearer logging
+     missing_cmds+=("realpath")
   fi
 
 
@@ -124,16 +128,20 @@ while [[ $# -gt 0 ]]; do
       ;;
     --wp)
       process_wp_sites=true
-      # Log message updated in validation section once default dir is confirmed
+      # Log message updated in validation section
       shift # past argument
       ;;
     --wp-config-dir)
       if [[ -z "$2" || "$2" == -* ]]; then
-        error_exit "Option '--wp-config-dir' requires a directory path argument."
+        # Allow empty string? No, require a name.
+        error_exit "Option '--wp-config-dir' requires a subdirectory name argument (e.g., 'config', 'includes')."
       fi
-      WP_CONFIG_SEARCH_DIR="$2"
-      # Basic validation moved to Argument Validation section
-      log "Will search for '$WP_CONFIG_FILENAME' in '$WP_CONFIG_SEARCH_DIR' if --wp is active."
+      # Basic check: ensure it doesn't start or end with / to avoid confusion
+      if [[ "$2" == /* || "$2" == */ ]]; then
+          error_exit "--wp-config-dir should be a relative subdirectory name, not starting or ending with '/'."
+      fi
+      WP_CONFIG_SUBDIR="$2"
+      log "Will search for '$WP_CONFIG_FILENAME' in the '$WP_CONFIG_SUBDIR' subdirectory within each site directory if --wp is active."
       shift # past argument
       shift # past value
       ;;
@@ -170,32 +178,14 @@ if [ ! -d "$TARGET_DIR" ]; then
   error_exit "Target directory '$TARGET_DIR' not found or is not a directory."
 fi
 
-# Determine the effective wp-config search directory if --wp is used
-EFFECTIVE_WP_CONFIG_SEARCH_DIR=""
+# Log the WP processing mode
 if [ "$process_wp_sites" = true ]; then
-    if [ -n "$WP_CONFIG_SEARCH_DIR" ]; then
-        # --wp and --wp-config-dir provided
-        EFFECTIVE_WP_CONFIG_SEARCH_DIR="$WP_CONFIG_SEARCH_DIR"
-        log "Processing WP sites: Using specified directory for wp-config.php: $EFFECTIVE_WP_CONFIG_SEARCH_DIR"
+    if [ -n "$WP_CONFIG_SUBDIR" ]; then
+        log "Processing WP sites: Will require '$WP_CONFIG_FILENAME' in the '$WP_CONFIG_SUBDIR' subdirectory of each site."
     else
-        # --wp provided, but --wp-config-dir not provided: default to current directory
-        EFFECTIVE_WP_CONFIG_SEARCH_DIR="."
-        log "Processing WP sites: Using current directory for wp-config.php: $(pwd)"
+        log "Processing WP sites: Will require '$WP_CONFIG_FILENAME' directly within each site directory."
     fi
-
-    # Validate the determined directory exists
-    if [ ! -d "$EFFECTIVE_WP_CONFIG_SEARCH_DIR" ]; then
-        error_exit "The directory specified or defaulted for wp-config.php ('$EFFECTIVE_WP_CONFIG_SEARCH_DIR') does not exist."
-    fi
-
-    # Validate wp-config.php exists in the determined directory
-    wp_config_full_path="$EFFECTIVE_WP_CONFIG_SEARCH_DIR/$WP_CONFIG_FILENAME"
-    # Use realpath to get the canonical path for the error message
-    wp_config_real_path=$(realpath "$wp_config_full_path" 2>/dev/null || echo "$wp_config_full_path")
-    if [ ! -f "$wp_config_full_path" ]; then
-        error_exit "--wp flag specified, but '$WP_CONFIG_FILENAME' not found in '$wp_config_real_path'."
-    fi
-elif [ -n "$WP_CONFIG_SEARCH_DIR" ]; then
+elif [ -n "$WP_CONFIG_SUBDIR" ]; then
     # --wp-config-dir provided without --wp
     log_warn "Ignoring --wp-config-dir because --wp flag was not provided."
 fi
@@ -248,18 +238,34 @@ for installdir in "$TARGET_DIR"/*/; do
     continue
   fi
 
-  # Check 2: Conditional skip based on --wp flag
+  # Check 2: Conditional skip based on --wp flag and wp-config.php location
+  wp_config_check_path=""
+  wp_config_exists=false
+
   if [ "$process_wp_sites" = true ]; then
-      # --wp flag is set: We already validated wp-config.php exists in EFFECTIVE_WP_CONFIG_SEARCH_DIR
-      log "Found '$COMPOSE_FILENAME' in '$installdir_clean' (processing as WP site based on config in '$EFFECTIVE_WP_CONFIG_SEARCH_DIR')."
+      # --wp flag is set: Check for wp-config.php in the required location (subdir or root of site dir)
+      if [ -n "$WP_CONFIG_SUBDIR" ]; then
+          wp_config_check_path="$installdir_clean/$WP_CONFIG_SUBDIR/$WP_CONFIG_FILENAME"
+      else
+          wp_config_check_path="$installdir_clean/$WP_CONFIG_FILENAME"
+      fi
+
+      if [ -f "$wp_config_check_path" ]; then
+          wp_config_exists=true
+          log "Found '$WP_CONFIG_FILENAME' (required by --wp) at '$wp_config_check_path' and '$COMPOSE_FILENAME' in '$installdir_clean'."
+      else
+          log "Skipping '$installdir_clean': '$WP_CONFIG_FILENAME' not found at '$wp_config_check_path' (--wp flag requires it)."
+          continue
+      fi
   else
-      # --wp flag is NOT set: Check for wp-config.php *within the site dir*
+      # --wp flag is NOT set: Check if wp-config.php exists *directly within the site dir* to skip it
       wp_config_in_site_dir_path="$installdir_clean/$WP_CONFIG_FILENAME"
       if [ -f "$wp_config_in_site_dir_path" ]; then
-          log "Skipping '$installdir_clean': '$WP_CONFIG_FILENAME' found inside (run with --wp flag to process WP sites)."
+          log "Skipping '$installdir_clean': '$WP_CONFIG_FILENAME' found at '$wp_config_in_site_dir_path' (run with --wp flag to process WP sites)."
           continue
       else
-          log "Found '$COMPOSE_FILENAME' in '$installdir_clean' ('$WP_CONFIG_FILENAME' not found inside, processing non-WP site)."
+          log "Found '$COMPOSE_FILENAME' in '$installdir_clean' ('$WP_CONFIG_FILENAME' not found directly inside, processing non-WP site)."
+          # wp_config_exists remains false
       fi
   fi
 
