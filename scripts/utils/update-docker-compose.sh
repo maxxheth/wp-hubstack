@@ -22,9 +22,10 @@ POST_DEPLOY_WAIT=10
 # --- Script Variables ---
 dry_run=false
 TARGET_DIR=""
-SOURCE_RESTART_POLICY="always" # Default source policy to look for
-TARGET_RESTART_POLICY="unless-stopped" # Target policy to set
-verify_wp_config=false # Default: Do not require wp-config.php
+TARGET_RESTART_POLICY="" # Policy to set, provided via flag
+process_wp_sites=false # Default: Skip directories containing wp-config.php
+# Array to hold exclusion patterns
+declare -a EXCLUDE_PATTERNS=("wordpress-manager" "*cache*")
 # --- End Script Variables ---
 
 
@@ -47,20 +48,59 @@ log_dry() {
 error_exit() {
   echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $1" >&2
   # Add usage information to error messages
-  echo "Usage: $0 [--dry-run] [--restart-policy <source_policy>] [--verify-wp-config] <path_to_wp_installations_directory>" >&2
+  echo "Usage: $0 [--dry-run] [--set-restart-policy <policy_value>] [--wp] [--exclude-dir <pattern>]... <path_to_installations_directory>" >&2
+  # Add specific instructions if yq is missing
+  if [[ "$1" == *"yq"* ]]; then
+    echo "" >&2
+    echo "To install yq (required for YAML processing):" >&2
+    echo "  sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && sudo chmod +x /usr/local/bin/yq" >&2
+    echo "Alternatively, check installation methods at: https://github.com/mikefarah/yq/#install" >&2
+  fi
   exit 1
+}
+
+# Function to check for required commands
+check_commands() {
+  local missing_cmds=()
+  if ! command -v docker &> /dev/null; then
+    missing_cmds+=("docker")
+  fi
+  # Check for docker compose OR docker-compose
+  if ! (docker compose version &> /dev/null || command -v docker-compose &> /dev/null) ; then
+     missing_cmds+=("docker compose or docker-compose")
+  fi
+  if ! command -v yq &> /dev/null; then
+     # Add 'yq' specifically so error_exit can detect it
+     missing_cmds+=("yq")
+  fi
+   if ! command -v curl &> /dev/null; then
+     missing_cmds+=("curl")
+  fi
+   if ! command -v wget &> /dev/null; then
+     # Wget is needed for the suggested install command
+     missing_cmds+=("wget")
+  fi
+
+
+  if [ ${#missing_cmds[@]} -ne 0 ]; then
+    error_exit "Required command(s) not found: ${missing_cmds[*]}. Please install them and ensure they are in your PATH."
+  fi
 }
 
 # Function to find the docker compose command
 find_docker_compose_cmd() {
-  if command -v docker &> /dev/null && docker compose version &> /dev/null; then
+  if docker compose version &> /dev/null; then
     echo "docker compose"
   elif command -v docker-compose &> /dev/null; then
     echo "docker-compose"
   else
-    error_exit "Neither 'docker compose' nor 'docker-compose' command found. Please ensure Docker Compose is installed and in your PATH."
+    # This case should ideally be caught by check_commands, but added as a safeguard
+    error_exit "Neither 'docker compose' nor 'docker-compose' command found."
   fi
 }
+
+# --- Initial Checks ---
+check_commands
 
 # --- Argument Parsing ---
 while [[ $# -gt 0 ]]; do
@@ -71,19 +111,28 @@ while [[ $# -gt 0 ]]; do
       log "Dry run mode enabled. No changes will be made."
       shift # past argument
       ;;
-    --restart-policy)
+    --set-restart-policy)
       if [[ -z "$2" || "$2" == -* ]]; then
-        error_exit "Option '--restart-policy' requires a non-empty argument (e.g., 'always', 'on-failure')."
+        error_exit "Option '--set-restart-policy' requires a policy value (e.g., 'unless-stopped', 'always')."
       fi
-      SOURCE_RESTART_POLICY="$2"
-      log "Source restart policy to search for set to '$SOURCE_RESTART_POLICY'."
+      TARGET_RESTART_POLICY="$2"
+      log "Target restart policy set to '$TARGET_RESTART_POLICY'."
       shift # past argument
       shift # past value
       ;;
-    --verify-wp-config)
-      verify_wp_config=true
-      log "Verification of '$WP_CONFIG_FILENAME' enabled."
+    --wp)
+      process_wp_sites=true
+      log "Processing enabled only for directories containing '$WP_CONFIG_FILENAME'."
       shift # past argument
+      ;;
+    --exclude-dir)
+      if [[ -z "$2" || "$2" == -* ]]; then
+        error_exit "Option '--exclude-dir' requires a pattern argument (e.g., 'temp-*', 'old-site')."
+      fi
+      EXCLUDE_PATTERNS+=("$2")
+      log "Added exclusion pattern: '$2'"
+      shift # past argument
+      shift # past value
       ;;
     -*)
       # Unknown option
@@ -117,7 +166,12 @@ fi
 # Determine the correct docker compose command
 DOCKER_COMPOSE_CMD=$(find_docker_compose_cmd)
 log "Using '$DOCKER_COMPOSE_CMD' for Docker operations."
-log "Will search for 'restart: $SOURCE_RESTART_POLICY' and replace with 'restart: $TARGET_RESTART_POLICY'."
+if [ -n "$TARGET_RESTART_POLICY" ]; then
+    log "Will set 'restart: $TARGET_RESTART_POLICY' on 'wp_*' service if found."
+else
+    log "No --set-restart-policy provided. Restart policies will not be modified."
+fi
+
 
 # --- Main Processing Loop ---
 log "Starting processing in directory: $TARGET_DIR"
@@ -127,40 +181,79 @@ shopt -s nullglob # Prevent loop from running if no subdirectories match
 for installdir in "$TARGET_DIR"/*/; do
   # Remove trailing slash for cleaner paths
   installdir_clean="${installdir%/}"
-  log "Processing potential WP installation: $installdir_clean"
+  dir_basename=$(basename "$installdir_clean")
+  log "Processing potential installation: $installdir_clean"
+
+  # Check against exclusion patterns
+  excluded=false
+  for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+    if [[ "$dir_basename" == $pattern ]]; then
+      log "Skipping '$installdir_clean': Directory name matches exclusion pattern '$pattern'."
+      excluded=true
+      break # No need to check other patterns
+    fi
+  done
+  if [ "$excluded" = true ]; then
+    continue # Move to the next directory
+  fi
 
   wp_config_path="$installdir_clean/$WP_CONFIG_FILENAME"
   compose_file_path="$installdir_clean/$COMPOSE_FILENAME"
-
-  # Check 1: wp-config.php exists (optional)
-  if [ "$verify_wp_config" = true ]; then
-    if [ ! -f "$wp_config_path" ]; then
-      log "Skipping '$installdir_clean': '$WP_CONFIG_FILENAME' not found (verification enabled)."
-      continue
-    fi
+  wp_config_exists=false
+  if [ -f "$wp_config_path" ]; then
+      wp_config_exists=true
   fi
 
-  # Check 2: docker-compose.yml exists
+  # Check 1: docker-compose.yml must always exist
   if [ ! -f "$compose_file_path" ]; then
     log "Skipping '$installdir_clean': '$COMPOSE_FILENAME' not found."
     continue
   fi
 
-  log "Found '$WP_CONFIG_FILENAME' and '$COMPOSE_FILENAME' in '$installdir_clean'."
-
-  # Check if modification is needed (using the source policy)
-  # Use double quotes for variable expansion in grep pattern
-  if ! grep -q "restart:[[:space:]]*$SOURCE_RESTART_POLICY" "$compose_file_path"; then
-     log "No 'restart: $SOURCE_RESTART_POLICY' policy found in '$compose_file_path'. Skipping modification and deployment checks."
-     continue
+  # Check 2: Conditional skip based on --wp flag and wp-config.php presence
+  if [ "$process_wp_sites" = true ]; then
+      # --wp flag is set: REQUIRE wp-config.php
+      if [ "$wp_config_exists" = false ]; then
+          log "Skipping '$installdir_clean': '$WP_CONFIG_FILENAME' not found (--wp flag requires it)."
+          continue
+      else
+          log "Found '$WP_CONFIG_FILENAME' (required by --wp) and '$COMPOSE_FILENAME' in '$installdir_clean'."
+      fi
+  else
+      # --wp flag is NOT set: REQUIRE wp-config.php to be ABSENT
+      if [ "$wp_config_exists" = true ]; then
+          log "Skipping '$installdir_clean': '$WP_CONFIG_FILENAME' found (run without --wp flag skips WP sites)."
+          continue
+      else
+          log "Found '$COMPOSE_FILENAME' in '$installdir_clean' ('$WP_CONFIG_FILENAME' not found, processing non-WP site)."
+      fi
   fi
+
+  # If we reach here, the directory meets the criteria based on the --wp flag.
+
+  # Check if modification is needed (only if --set-restart-policy was provided)
+  if [ -z "$TARGET_RESTART_POLICY" ]; then
+     log "Skipping restart policy modification for '$installdir_clean' as --set-restart-policy was not provided."
+     continue # Skip modification and deployment checks if policy wasn't set
+  fi
+
+  # Find the service key starting with 'wp_' using yq
+  # Use yq eval to handle potential errors gracefully within the command substitution
+  wp_service_key=$(yq eval '.services | keys | .[] | select(. == "wp_*")' "$compose_file_path" 2>/dev/null || true)
+
+  if [ -z "$wp_service_key" ]; then
+      log_warn "Could not find a service key starting with 'wp_' in '$compose_file_path'. Skipping restart policy modification."
+      continue
+  fi
+  log "Found 'wp_*' service key: '$wp_service_key'"
+
 
   # --- Modification and Deployment Section ---
   current_date=$(date +"$DATE_FORMAT")
   backup_file="$installdir_clean/docker-compose-bu-$current_date.yml"
   site_hostname=$(basename "$installdir_clean")
-  # *** Assumption: Site URL derived from directory name, uses HTTP on port 80 ***
-  site_url="http://$site_hostname"
+  # *** Assumption: Site URL derived from directory name, uses HTTPS on port 443 ***
+  site_url="https://$site_hostname" # Keep HTTPS assumption or make configurable
 
   # 3. Create backup
   log_dry "Would back up '$compose_file_path' to '$backup_file'"
@@ -169,20 +262,37 @@ for installdir in "$TARGET_DIR"/*/; do
     cp "$compose_file_path" "$backup_file" # set -e handles cp errors if not dry run
   fi
 
-  # 4. Replace restart policy
-  log_dry "Would replace 'restart: $SOURCE_RESTART_POLICY' with 'restart: $TARGET_RESTART_POLICY' in '$compose_file_path'"
+  # 4. Set restart policy using yq
+  log_dry "Would set 'restart: $TARGET_RESTART_POLICY' for service '$wp_service_key' in '$compose_file_path' using yq"
   if [ "$dry_run" = false ]; then
-    log "Replacing 'restart: $SOURCE_RESTART_POLICY' with 'restart: $TARGET_RESTART_POLICY' in '$compose_file_path'..."
-    # Use double quotes for sed script to allow variable expansion
-    sed "s/restart:[[:space:]]*$SOURCE_RESTART_POLICY/restart: $TARGET_RESTART_POLICY/g" "$compose_file_path" > "$compose_file_path.tmp" && mv "$compose_file_path.tmp" "$compose_file_path"
+      log "Setting 'restart: $TARGET_RESTART_POLICY' for service '$wp_service_key' in '$compose_file_path' using yq..."
+      # Use yq eval with -i for in-place editing. Capture potential errors.
+      if ! yq eval --inplace ".services[\"$wp_service_key\"].restart = \"$TARGET_RESTART_POLICY\"" "$compose_file_path"; then
+          # Attempt to restore backup on yq failure
+          log_warn "yq command failed to modify '$compose_file_path'. Attempting to restore backup..."
+          if cp "$backup_file" "$compose_file_path"; then
+              log_warn "Restored '$compose_file_path' from backup '$backup_file'."
+          else
+              log_warn "Failed to restore backup '$backup_file'. Manual check required for '$compose_file_path'."
+          fi
+          error_exit "yq failed to modify '$compose_file_path'. Check yq version and file syntax (backup restored if possible)."
+      fi
   fi
 
   # 5. Validate the modified docker-compose.yml file
   log_dry "Would validate modified '$compose_file_path' using '$DOCKER_COMPOSE_CMD config -q'"
   if [ "$dry_run" = false ]; then
     log "Validating modified '$compose_file_path'..."
+    # Use subshell for cd to avoid changing script's working directory
     if ! (cd "$installdir_clean" && $DOCKER_COMPOSE_CMD config -q) ; then
-        error_exit "Docker Compose validation failed for '$compose_file_path'. Restoring from backup '$backup_file' might be needed. Check the file for syntax errors."
+        # Attempt to restore backup on validation failure
+        log_warn "Docker Compose validation failed for '$compose_file_path'. Attempting to restore backup..."
+        if cp "$backup_file" "$compose_file_path"; then
+            log_warn "Restored '$compose_file_path' from backup '$backup_file'."
+        else
+            log_warn "Failed to restore backup '$backup_file'. Manual check required for '$compose_file_path'."
+        fi
+        error_exit "Docker Compose validation failed. Check the file for syntax errors (backup restored if possible)."
         # Script exits here due to set -e or the explicit error_exit
     else
         log "Validation successful for '$compose_file_path'."
@@ -208,9 +318,10 @@ for installdir in "$TARGET_DIR"/*/; do
   log_dry "Would check for HTTP 200 status at '$site_url'"
   if [ "$dry_run" = false ]; then
     log "Attempting to check site status at '$site_url'..."
-    log "Note: Assumes directory name '$site_hostname' is the correct, resolvable hostname and site uses HTTP."
+    log "Note: Assumes directory name '$site_hostname' is the correct, resolvable hostname and site uses HTTPS." # Updated note
 
-    http_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --location --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" "$site_url" || echo "curl_error")
+    # Use -k for curl to ignore certificate issues for local/staging environments if needed
+    http_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --location --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" -k "$site_url" || echo "curl_error")
     # The '|| echo "curl_error"' prevents set -e from exiting if curl itself fails (e.g., connection refused)
 
     if [ "$http_status" -eq 200 ]; then
