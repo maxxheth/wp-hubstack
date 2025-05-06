@@ -8,6 +8,7 @@ PARENT_DIR="."
 ACTION=""
 ALWAYS_YES=false
 SELECT_SITE_FLAG=false
+DRY_RUN_MODE=false # Added for --dry-run
 
 # --- Helper Functions ---
 display_help() {
@@ -27,6 +28,7 @@ display_help() {
     echo "  --restore-latest           Restore the Dockerfile from the most recent backup."
     echo "  --restore-earliest         Restore the Dockerfile from the oldest (earliest) backup."
     echo
+    echo "  --dry-run                  Perform a dry run; show what would be done without making changes."
     echo "  -y, --yes                  Automatically answer yes to prompts (e.g., for deletion or restoration)."
     echo "  -h, --help                 Display this help message."
     echo
@@ -88,6 +90,7 @@ else
             --restore-earliest)
                 if [[ -n "$ACTION" ]]; then echo "Error: Only one action flag allowed. ('$ACTION' already set)" >&2; display_help; exit 1; fi
                 ACTION="restore_earliest"; ACTION_FLAG_COUNT=$((ACTION_FLAG_COUNT + 1)); shift ;;
+            --dry-run) DRY_RUN_MODE=true; shift ;;
             -y|--yes) ALWAYS_YES=true; shift ;;
             -h|--help) display_help; exit 0 ;;
             *) echo "Error: Unknown parameter passed: $1"; display_help; exit 1 ;;
@@ -213,14 +216,21 @@ perform_delete_all() {
     if confirm_action "  Are you sure you want to delete ALL ${#current_backups_ref[@]} backup(s) for $current_site_path?"; then
         local delete_count=0
         for backup_file in "${current_backups_ref[@]}"; do
-            if rm "$backup_file"; then
+            if [[ "$DRY_RUN_MODE" == "true" ]]; then
+                echo "    [DRY RUN] Would delete: $(basename "$backup_file")"
+                delete_count=$((delete_count + 1))
+            elif rm "$backup_file"; then
                 echo "    Deleted: $(basename "$backup_file")"
                 delete_count=$((delete_count + 1))
             else
                 echo "    ERROR: Failed to delete '$backup_file'."
             fi
         done
-        echo "  Summary: Deleted $delete_count of ${#current_backups_ref[@]} backup(s) for $current_site_path."
+        if [[ "$DRY_RUN_MODE" == "true" ]]; then
+            echo "  [DRY RUN] Summary: Would delete $delete_count of ${#current_backups_ref[@]} backup(s) for $current_site_path."
+        else
+            echo "  Summary: Deleted $delete_count of ${#current_backups_ref[@]} backup(s) for $current_site_path."
+        fi
     else
         echo "  Deletion cancelled by user for $current_site_path."
     fi
@@ -257,14 +267,21 @@ perform_delete_except_latest() {
     if confirm_action "  Delete these ${#backups_to_delete[@]} older backup(s) for $current_site_path?"; then
         local delete_count=0
         for backup_file in "${backups_to_delete[@]}"; do
-            if rm "$backup_file"; then
+            if [[ "$DRY_RUN_MODE" == "true" ]]; then
+                echo "    [DRY RUN] Would delete: $(basename "$backup_file")"
+                delete_count=$((delete_count + 1))
+            elif rm "$backup_file"; then
                 echo "    Deleted: $(basename "$backup_file")"
                 delete_count=$((delete_count + 1))
             else
                 echo "    ERROR: Failed to delete '$backup_file'."
             fi
         done
-        echo "  Summary: Deleted $delete_count of ${#backups_to_delete[@]} older backup(s) for $current_site_path."
+        if [[ "$DRY_RUN_MODE" == "true" ]]; then
+            echo "  [DRY RUN] Summary: Would delete $delete_count of ${#backups_to_delete[@]} older backup(s) for $current_site_path."
+        else
+            echo "  Summary: Deleted $delete_count of ${#backups_to_delete[@]} older backup(s) for $current_site_path."
+        fi
     else
         echo "  Deletion cancelled by user for $current_site_path."
     fi
@@ -284,7 +301,6 @@ perform_delete_except_earliest() {
     echo "  Earliest backup for $current_site_path (will be KEPT): $(basename "$earliest_backup_path")"
 
     local backups_to_delete=()
-    # Iterate from the second element to the end
     for i in $(seq 1 $((num_backups-1)) ); do
         backups_to_delete+=("${current_backups_ref[$i]}")
     done
@@ -302,14 +318,21 @@ perform_delete_except_earliest() {
     if confirm_action "  Delete these ${#backups_to_delete[@]} newer backup(s) for $current_site_path?"; then
         local delete_count=0
         for backup_file in "${backups_to_delete[@]}"; do
-            if rm "$backup_file"; then
+            if [[ "$DRY_RUN_MODE" == "true" ]]; then
+                echo "    [DRY RUN] Would delete: $(basename "$backup_file")"
+                delete_count=$((delete_count + 1))
+            elif rm "$backup_file"; then
                 echo "    Deleted: $(basename "$backup_file")"
                 delete_count=$((delete_count + 1))
             else
                 echo "    ERROR: Failed to delete '$backup_file'."
             fi
         done
-        echo "  Summary: Deleted $delete_count of ${#backups_to_delete[@]} newer backup(s) for $current_site_path."
+        if [[ "$DRY_RUN_MODE" == "true" ]]; then
+            echo "  [DRY RUN] Summary: Would delete $delete_count of ${#backups_to_delete[@]} newer backup(s) for $current_site_path."
+        else
+            echo "  Summary: Deleted $delete_count of ${#backups_to_delete[@]} newer backup(s) for $current_site_path."
+        fi
     else
         echo "  Deletion cancelled by user for $current_site_path."
     fi
@@ -343,7 +366,9 @@ perform_restore() {
     done
 
     if confirm_action "  Restore '$dockerfile_path' from '$(basename "$selected_backup_path")'?"; then
-        if cp "$selected_backup_path" "$dockerfile_path"; then
+        if [[ "$DRY_RUN_MODE" == "true" ]]; then
+            echo "  [DRY RUN] Would restore '$dockerfile_path' from '$(basename "$selected_backup_path")'."
+        elif cp "$selected_backup_path" "$dockerfile_path"; then
             echo "  SUCCESS: '$dockerfile_path' restored from '$(basename "$selected_backup_path")'."
         else
             echo "  ERROR: Failed to restore '$dockerfile_path' from '$(basename "$selected_backup_path")'."
@@ -366,7 +391,9 @@ perform_restore_latest() {
     local latest_backup_path="${current_backups_ref[${#current_backups_ref[@]}-1]}"
 
     if confirm_action "  Restore '$dockerfile_path' from the latest backup '$(basename "$latest_backup_path")'?"; then
-        if cp "$latest_backup_path" "$dockerfile_path"; then
+        if [[ "$DRY_RUN_MODE" == "true" ]]; then
+            echo "  [DRY RUN] Would restore '$dockerfile_path' from '$(basename "$latest_backup_path")'."
+        elif cp "$latest_backup_path" "$dockerfile_path"; then
             echo "  SUCCESS: '$dockerfile_path' restored from '$(basename "$latest_backup_path")'."
         else
             echo "  ERROR: Failed to restore '$dockerfile_path' from '$(basename "$latest_backup_path")'."
@@ -389,7 +416,9 @@ perform_restore_earliest() {
     local earliest_backup_path="${current_backups_ref[0]}" # Backups are sorted oldest to newest
 
     if confirm_action "  Restore '$dockerfile_path' from the earliest backup '$(basename "$earliest_backup_path")'?"; then
-        if cp "$earliest_backup_path" "$dockerfile_path"; then
+        if [[ "$DRY_RUN_MODE" == "true" ]]; then
+            echo "  [DRY RUN] Would restore '$dockerfile_path' from '$(basename "$earliest_backup_path")'."
+        elif cp "$earliest_backup_path" "$dockerfile_path"; then
             echo "  SUCCESS: '$dockerfile_path' restored from '$(basename "$earliest_backup_path")'."
         else
             echo "  ERROR: Failed to restore '$dockerfile_path' from '$(basename "$earliest_backup_path")'."
@@ -403,6 +432,10 @@ perform_restore_earliest() {
 # --- Main Execution ---
 echo "WordPress Dockerfile Backup Manager"
 echo "-----------------------------------"
+if [[ "$DRY_RUN_MODE" == "true" ]]; then
+    echo "*** DRY RUN MODE ENABLED - NO CHANGES WILL BE MADE ***"
+    echo "-----------------------------------"
+fi
 echo "Searching for WordPress installations in: $PARENT_DIR"
 
 declare -a ALL_WP_SITES
