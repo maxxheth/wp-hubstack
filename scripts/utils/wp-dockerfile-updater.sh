@@ -93,43 +93,54 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
 
     # 2. Update Dockerfile
     # Define the content for the Dockerfile lines
-    UTILITIES_CMD_CONTENT="apt-get update && apt-get install -y --no-install-recommends ca-certificates && apt-get update && apt-get install -y --no-install-recommends jq awk curl git && rm -rf /var/lib/apt/lists/*"
-    FULL_UTILITIES_LINE="RUN $UTILITIES_CMD_CONTENT"
+
+    # The OLD utilities command string, with --no-install-recommends
+    OLD_UTILITIES_CMD_CONTENT_VAL="apt-get update && apt-get install -y --no-install-recommends ca-certificates && apt-get update && apt-get install -y --no-install-recommends jq awk curl git && rm -rf /var/lib/apt/lists/*"
+    # Create a grep pattern to specifically match and remove the OLD utilities line.
+    # We need to escape the '*' character for it to be treated literally in the grep pattern.
+    OLD_UTILITIES_CMD_CONTENT_ESCAPED_FOR_GREP="${OLD_UTILITIES_CMD_CONTENT_VAL//\*/\\*}"
+    OLD_UTILITIES_LINE_REMOVAL_PATTERN="^RUN *$OLD_UTILITIES_CMD_CONTENT_ESCAPED_FOR_GREP"
+
+    # The NEW utilities command string, without --no-install-recommends
+    UTILITIES_CMD_CONTENT="apt-get update && apt-get install -y ca-certificates && apt-get update && apt-get install -y jq gawk curl git && rm -rf /var/lib/apt/lists/*"
+    FULL_UTILITIES_LINE="RUN $UTILITIES_CMD_CONTENT" # This is the new line to be added
+
     CURRENT_DATE=$(date)
+    USER_ROOT_LINE="USER root" # Line to switch to root user
     COMMENT_LINE="# Utilities and WP-CLI packages ensured by update script on $CURRENT_DATE"
     WP_CLI_INSTALL_LINE="RUN ${WP_CLI_COMMAND}"
 
     # Define patterns to find and remove potentially existing old lines
-    # These patterns are heuristics. Adjust if they are too broad or too narrow.
     COMMENT_PATTERN_GREP="^# Utilities and WP-CLI packages ensured by update script"
-    # Pattern for the utilities line we might have added or a similar one that installs these specific tools
-    UTILITIES_PATTERN_GREP="RUN .*apt-get install.*(jq|awk|curl|git).*(ca-certificates|jq|awk|curl|git)"
-    # Pattern for the specific WP-CLI doctor command installation
     WP_CLI_DOCTOR_PATTERN_GREP="RUN .*wp package install wp-cli/doctor-command"
+    USER_ROOT_PATTERN_GREP="^USER root" # Pattern to remove any existing USER root lines
 
     if [[ "$DRY_RUN" == "true" ]]; then
         echo " [DRY RUN] Would process $DOCKERFILE to ensure specific lines are present/updated:"
+        echo " [DRY RUN]   - Would remove lines matching: $USER_ROOT_PATTERN_GREP" # Added for dry run
         echo " [DRY RUN]   - Would remove lines matching: $COMMENT_PATTERN_GREP"
-        echo " [DRY RUN]   - Would remove lines matching: $UTILITIES_PATTERN_GREP"
+        echo " [DRY RUN]   - Would remove lines matching specific old utilities pattern: $OLD_UTILITIES_LINE_REMOVAL_PATTERN"
         echo " [DRY RUN]   - Would remove lines matching: $WP_CLI_DOCTOR_PATTERN_GREP"
+        echo " [DRY RUN]   - Would append: $USER_ROOT_LINE"
         echo " [DRY RUN]   - Would append: $COMMENT_LINE"
-        echo " [DRY RUN]   - Would append: $FULL_UTILITIES_LINE"
+        echo " [DRY RUN]   - Would append: $FULL_UTILITIES_LINE" # New utilities line
         echo " [DRY RUN]   - Would append: $WP_CLI_INSTALL_LINE"
     else
         echo " [INFO] Updating Dockerfile: $DOCKERFILE"
         TEMP_DOCKERFILE=$(mktemp)
         if [[ -z "$TEMP_DOCKERFILE" ]]; then
             echo " [ERROR] Failed to create temporary file. Skipping $DOCKERFILE."
-            # Attempt to restore the backup if something went wrong before this point, though unlikely here.
             if [[ -f "$BACKUP_FILE" ]] && ! mv "$BACKUP_FILE" "$DOCKERFILE"; then
                  echo " [CRITICAL] Failed to restore backup $BACKUP_FILE to $DOCKERFILE after mktemp failure!"
             fi
             continue # Skip this directory
         fi
 
-        # Filter out old/existing lines
-        grep -vE "$COMMENT_PATTERN_GREP" "$DOCKERFILE" | \
-            grep -vE "$UTILITIES_PATTERN_GREP" | \
+        # Filter out old/existing lines using the specific pattern for the old utilities command
+        # and also remove any existing "USER root" lines
+        grep -vE "$USER_ROOT_PATTERN_GREP" "$DOCKERFILE" | \
+            grep -vE "$COMMENT_PATTERN_GREP" | \
+            grep -vE "$OLD_UTILITIES_LINE_REMOVAL_PATTERN" | \
             grep -vE "$WP_CLI_DOCTOR_PATTERN_GREP" > "$TEMP_DOCKERFILE"
 
         # Check if grep pipeline succeeded (at least the last grep)
@@ -144,6 +155,7 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
 
         # Append the new, correct block of commands
         echo "" >> "$TEMP_DOCKERFILE" # Add a newline just in case the file doesn't end with one
+        echo "$USER_ROOT_LINE" >> "$TEMP_DOCKERFILE" # Add USER root before other commands
         echo "$COMMENT_LINE" >> "$TEMP_DOCKERFILE"
         echo "$FULL_UTILITIES_LINE" >> "$TEMP_DOCKERFILE"
         echo "$WP_CLI_INSTALL_LINE" >> "$TEMP_DOCKERFILE"
