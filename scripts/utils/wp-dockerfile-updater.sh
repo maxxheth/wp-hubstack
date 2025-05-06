@@ -92,25 +92,68 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
     fi
 
     # 2. Update Dockerfile
-    if [[ "$DRY_RUN" == "true" ]]; then
-        echo " [DRY RUN] Would append the following lines to $DOCKERFILE:"
-        echo "   # Utilities and WP-CLI packages ensured by update script on $(date)"
-        echo "   RUN apt-get update && apt-get install -y jq awk curl git --no-install-recommends && rm -rf /var/lib/apt/lists/*"
-        echo "   RUN ${WP_CLI_COMMAND}"
-    else
-        echo " [INFO] Appending commands to $DOCKERFILE..."
-        # Add a newline just in case the file doesn't end with one
-        echo "" >> "$DOCKERFILE"
-        # Add a comment indicating the change
-        echo "# Utilities and WP-CLI packages ensured by update script on $(date)" >> "$DOCKERFILE"
-        # Add RUN command for apt-get update and install utilities
-        echo "RUN apt-get update && apt-get install -y jq awk curl git --no-install-recommends && rm -rf /var/lib/apt/lists/*" >> "$DOCKERFILE"
-        # Append the RUN command for WP-CLI doctor command
-        echo "RUN ${WP_CLI_COMMAND}" >> "$DOCKERFILE"
+    # Define the content for the Dockerfile lines
+    UTILITIES_CMD_CONTENT="apt-get update && apt-get install -y --no-install-recommends ca-certificates && apt-get update && apt-get install -y --no-install-recommends jq awk curl git && rm -rf /var/lib/apt/lists/*"
+    FULL_UTILITIES_LINE="RUN $UTILITIES_CMD_CONTENT"
+    CURRENT_DATE=$(date)
+    COMMENT_LINE="# Utilities and WP-CLI packages ensured by update script on $CURRENT_DATE"
+    WP_CLI_INSTALL_LINE="RUN ${WP_CLI_COMMAND}"
 
-        if [[ $? -ne 0 ]]; then
-            echo " [ERROR] Failed to append commands to Dockerfile. Restoring backup."
-            # Attempt to restore the backup
+    # Define patterns to find and remove potentially existing old lines
+    # These patterns are heuristics. Adjust if they are too broad or too narrow.
+    COMMENT_PATTERN_GREP="^# Utilities and WP-CLI packages ensured by update script"
+    # Pattern for the utilities line we might have added or a similar one that installs these specific tools
+    UTILITIES_PATTERN_GREP="RUN .*apt-get install.*(jq|awk|curl|git).*(ca-certificates|jq|awk|curl|git)"
+    # Pattern for the specific WP-CLI doctor command installation
+    WP_CLI_DOCTOR_PATTERN_GREP="RUN .*wp package install wp-cli/doctor-command"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo " [DRY RUN] Would process $DOCKERFILE to ensure specific lines are present/updated:"
+        echo " [DRY RUN]   - Would remove lines matching: $COMMENT_PATTERN_GREP"
+        echo " [DRY RUN]   - Would remove lines matching: $UTILITIES_PATTERN_GREP"
+        echo " [DRY RUN]   - Would remove lines matching: $WP_CLI_DOCTOR_PATTERN_GREP"
+        echo " [DRY RUN]   - Would append: $COMMENT_LINE"
+        echo " [DRY RUN]   - Would append: $FULL_UTILITIES_LINE"
+        echo " [DRY RUN]   - Would append: $WP_CLI_INSTALL_LINE"
+    else
+        echo " [INFO] Updating Dockerfile: $DOCKERFILE"
+        TEMP_DOCKERFILE=$(mktemp)
+        if [[ -z "$TEMP_DOCKERFILE" ]]; then
+            echo " [ERROR] Failed to create temporary file. Skipping $DOCKERFILE."
+            # Attempt to restore the backup if something went wrong before this point, though unlikely here.
+            if [[ -f "$BACKUP_FILE" ]] && ! mv "$BACKUP_FILE" "$DOCKERFILE"; then
+                 echo " [CRITICAL] Failed to restore backup $BACKUP_FILE to $DOCKERFILE after mktemp failure!"
+            fi
+            continue # Skip this directory
+        fi
+
+        # Filter out old/existing lines
+        grep -vE "$COMMENT_PATTERN_GREP" "$DOCKERFILE" | \
+            grep -vE "$UTILITIES_PATTERN_GREP" | \
+            grep -vE "$WP_CLI_DOCTOR_PATTERN_GREP" > "$TEMP_DOCKERFILE"
+
+        # Check if grep pipeline succeeded (at least the last grep)
+        if [[ $? -ne 0 && $? -ne 1 ]]; then # $? is 1 if no lines matched, which is fine. Other errors are not.
+             echo " [ERROR] Failed to filter $DOCKERFILE. Restoring backup."
+             rm -f "$TEMP_DOCKERFILE"
+             if ! mv "$BACKUP_FILE" "$DOCKERFILE"; then
+                 echo " [CRITICAL] Failed to restore backup $BACKUP_FILE to $DOCKERFILE!"
+             fi
+             continue # Skip this directory
+        fi
+
+        # Append the new, correct block of commands
+        echo "" >> "$TEMP_DOCKERFILE" # Add a newline just in case the file doesn't end with one
+        echo "$COMMENT_LINE" >> "$TEMP_DOCKERFILE"
+        echo "$FULL_UTILITIES_LINE" >> "$TEMP_DOCKERFILE"
+        echo "$WP_CLI_INSTALL_LINE" >> "$TEMP_DOCKERFILE"
+
+        # Replace the original Dockerfile with the modified temporary file
+        if mv "$TEMP_DOCKERFILE" "$DOCKERFILE"; then
+            echo " [INFO] Successfully updated $DOCKERFILE."
+        else
+            echo " [ERROR] Failed to move temporary file to $DOCKERFILE. Restoring backup."
+            rm -f "$TEMP_DOCKERFILE" # Clean up temp file if mv failed
             if ! mv "$BACKUP_FILE" "$DOCKERFILE"; then
                  echo " [CRITICAL] Failed to restore backup $BACKUP_FILE to $DOCKERFILE!"
             fi
