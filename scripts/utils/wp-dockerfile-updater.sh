@@ -112,7 +112,7 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
 
     # Define patterns to find and remove potentially existing old lines
     COMMENT_PATTERN_GREP="^# Utilities and WP-CLI packages ensured by update script"
-    WP_CLI_DOCTOR_PATTERN_GREP="RUN .*wp package install wp-cli/doctor-command"
+    WP_CLI_DOCTOR_PATTERN_GREP="RUN .*wp --allow-root package install wp-cli/doctor-command"
     USER_ROOT_PATTERN_GREP="^USER root" # Pattern to remove any existing USER root lines
 
     if [[ "$DRY_RUN" == "true" ]]; then
