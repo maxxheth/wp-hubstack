@@ -102,7 +102,7 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
     OLD_UTILITIES_LINE_REMOVAL_PATTERN="^RUN *$OLD_UTILITIES_CMD_CONTENT_ESCAPED_FOR_GREP"
 
     # The NEW utilities command string, without --no-install-recommends
-    UTILITIES_CMD_CONTENT="apt-get update && apt-get install -y ca-certificates && apt-get update && apt-get install -y jq gawk curl git && rm -rf /var/lib/apt/lists/*"
+    UTILITIES_CMD_CONTENT="rm -rf /var/lib/apt/lists/* && apt-get update -y && apt-get install -y jq gawk curl git ca-certificates"
     FULL_UTILITIES_LINE="RUN $UTILITIES_CMD_CONTENT" # This is the new line to be added
 
     CURRENT_DATE=$(date)
