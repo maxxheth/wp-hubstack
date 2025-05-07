@@ -9,10 +9,42 @@ PARENT_DIR="."
 
 # --- Argument Parsing ---
 DRY_RUN="false"
-if [[ "$1" == "--dry-run" ]]; then
-  DRY_RUN="true"
+APPEND_ONLY_MODE="false" # Initialize new flag
+
+# Process arguments
+# Use a loop to handle flags in any order
+TEMP_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN="true"
+      shift # past argument
+      ;;
+    --append-only)
+      APPEND_ONLY_MODE="true"
+      shift # past argument
+      ;;
+    *)
+      # Unknown option or positional argument (if any were expected)
+      # This script doesn't expect other positional args after flags
+      # TEMP_ARGS+=("$1")
+      echo "Unknown option: $1" >&2
+      # exit 1 # Or handle as appropriate
+      shift # past argument
+      ;;
+  esac
+done
+# Restore positional arguments if needed:
+# set -- "${TEMP_ARGS[@]}"
+
+if [[ "$DRY_RUN" == "true" ]]; then
   echo "*** DRY RUN MODE ENABLED ***"
   echo "No files will be modified and no Docker commands will be executed."
+  echo "-------------------------------------------------"
+fi
+if [[ "$APPEND_ONLY_MODE" == "true" ]]; then
+  echo "*** APPEND-ONLY MODE ENABLED ***"
+  echo "Existing lines will not be filtered; new commands will simply be appended."
   echo "-------------------------------------------------"
 fi
 # --- End Argument Parsing ---
@@ -113,14 +145,25 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
     # Define patterns to find and remove potentially existing old lines
     COMMENT_PATTERN_GREP="^# Utilities and WP-CLI packages ensured by update script"
     # WP_CLI_DOCTOR_PATTERN_GREP="RUN .*wp package install wp-cli/doctor-command"
-    USER_ROOT_PATTERN_GREP="^USER root" # Pattern to remove any existing USER root lines
+    # USER_ROOT_PATTERN_GREP="^USER root" # This pattern is defined but not used in the current filter pipeline below
 
     if [[ "$DRY_RUN" == "true" ]]; then
         echo " [DRY RUN] Would process $DOCKERFILE to ensure specific lines are present/updated:"
-        echo " [DRY RUN]   - Would remove lines matching: $USER_ROOT_PATTERN_GREP" # Added for dry run
-        echo " [DRY RUN]   - Would remove lines matching: $COMMENT_PATTERN_GREP"
-        echo " [DRY RUN]   - Would remove lines matching specific old utilities pattern: $OLD_UTILITIES_LINE_REMOVAL_PATTERN"
-        # echo " [DRY RUN]   - Would remove lines matching: $WP_CLI_DOCTOR_PATTERN_GREP"
+        if [[ "$APPEND_ONLY_MODE" == "true" ]]; then
+            echo " [DRY RUN]   Mode: Append-only. No lines would be removed by filtering."
+        else
+            echo " [DRY RUN]   Mode: Filter and Append."
+            # Only list patterns that are actively used in the grep pipeline below
+            echo " [DRY RUN]     - Would remove lines matching: $COMMENT_PATTERN_GREP"
+            echo " [DRY RUN]     - Would remove lines matching specific old utilities pattern: $OLD_UTILITIES_LINE_REMOVAL_PATTERN"
+            # If WP_CLI_DOCTOR_PATTERN_GREP is defined and non-empty, it would filter.
+            # If its definition is commented out, the variable is empty, and grep -vE "" doesn't remove lines.
+            if [[ -n "$WP_CLI_DOCTOR_PATTERN_GREP" ]]; then
+                echo " [DRY RUN]     - Would remove lines matching: $WP_CLI_DOCTOR_PATTERN_GREP"
+            else
+                echo " [DRY RUN]     - WP_CLI_DOCTOR_PATTERN_GREP is not actively filtering (variable empty or undefined)."
+            fi
+        fi
         echo " [DRY RUN]   - Would append: $USER_ROOT_LINE"
         echo " [DRY RUN]   - Would append: $COMMENT_LINE"
         echo " [DRY RUN]   - Would append: $FULL_UTILITIES_LINE" # New utilities line
@@ -136,20 +179,37 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
             continue # Skip this directory
         fi
 
-        # Filter out old/existing lines using the specific pattern for the old utilities command
-        # and also remove any existing "USER root" lines
-        grep -vE "$COMMENT_PATTERN_GREP" "$DOCKERFILE" | \
-            grep -vE "$OLD_UTILITIES_LINE_REMOVAL_PATTERN" | \
-            grep -vE "$WP_CLI_DOCTOR_PATTERN_GREP" > "$TEMP_DOCKERFILE"
+        if [[ "$APPEND_ONLY_MODE" == "true" ]]; then
+            echo " [INFO] Append-only mode: Copying original Dockerfile content to temporary file."
+            if ! cp "$DOCKERFILE" "$TEMP_DOCKERFILE"; then
+                echo " [ERROR] Failed to copy $DOCKERFILE to $TEMP_DOCKERFILE. Restoring backup."
+                rm -f "$TEMP_DOCKERFILE"
+                if [[ -f "$BACKUP_FILE" ]] && ! mv "$BACKUP_FILE" "$DOCKERFILE"; then
+                    echo " [CRITICAL] Failed to restore backup $BACKUP_FILE to $DOCKERFILE after cp failure!"
+                fi
+                continue # Skip this directory
+            fi
+        else
+            echo " [INFO] Filtering Dockerfile..."
+            # Filter out old/existing lines using the specific pattern for the old utilities command
+            # The WP_CLI_DOCTOR_PATTERN_GREP variable is used here. If its definition is commented out,
+            # it will be empty, and `grep -vE ""` effectively doesn't filter anything for that step.
+            grep -vE "$COMMENT_PATTERN_GREP" "$DOCKERFILE" | \
+                grep -vE "$OLD_UTILITIES_LINE_REMOVAL_PATTERN" | \
+                grep -vE "$WP_CLI_DOCTOR_PATTERN_GREP" > "$TEMP_DOCKERFILE"
 
-        # Check if grep pipeline succeeded (at least the last grep)
-        if [[ $? -ne 0 && $? -ne 1 ]]; then # $? is 1 if no lines matched, which is fine. Other errors are not.
-             echo " [ERROR] Failed to filter $DOCKERFILE. Restoring backup."
-             rm -f "$TEMP_DOCKERFILE"
-             if ! mv "$BACKUP_FILE" "$DOCKERFILE"; then
-                 echo " [CRITICAL] Failed to restore backup $BACKUP_FILE to $DOCKERFILE!"
-             fi
-             continue # Skip this directory
+            # Check if grep pipeline succeeded (at least the last grep)
+            # $? is 1 if no lines matched (which is fine). Other errors are not.
+            # This checks the exit status of the last command in the pipeline (the final grep).
+            GREP_EXIT_STATUS=$?
+            if [[ $GREP_EXIT_STATUS -ne 0 && $GREP_EXIT_STATUS -ne 1 ]]; then
+                 echo " [ERROR] Failed to filter $DOCKERFILE (grep exit status: $GREP_EXIT_STATUS). Restoring backup."
+                 rm -f "$TEMP_DOCKERFILE"
+                 if ! mv "$BACKUP_FILE" "$DOCKERFILE"; then
+                     echo " [CRITICAL] Failed to restore backup $BACKUP_FILE to $DOCKERFILE!"
+                 fi
+                 continue # Skip this directory
+            fi
         fi
 
         # Append the new, correct block of commands
