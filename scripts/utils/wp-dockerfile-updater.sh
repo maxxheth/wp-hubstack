@@ -138,8 +138,7 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
 
         # Filter out old/existing lines using the specific pattern for the old utilities command
         # and also remove any existing "USER root" lines
-        grep -vE "$USER_ROOT_PATTERN_GREP" "$DOCKERFILE" | \
-            grep -vE "$COMMENT_PATTERN_GREP" | \
+        grep -vE "$COMMENT_PATTERN_GREP" "$DOCKERFILE" | \
             grep -vE "$OLD_UTILITIES_LINE_REMOVAL_PATTERN" | \
             grep -vE "$WP_CLI_DOCTOR_PATTERN_GREP" > "$TEMP_DOCKERFILE"
 
