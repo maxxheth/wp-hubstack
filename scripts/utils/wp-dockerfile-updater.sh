@@ -4,7 +4,7 @@
 # Set the parent directory to search within. Use "." for the current directory.
 PARENT_DIR="."
 # Set the command to add to the Dockerfile
-WP_CLI_COMMAND="wp --allow-root package install wp-cli/doctor-command:@stable"
+# WP_CLI_COMMAND="wp --allow-root package install wp-cli/doctor-command:@stable"
 # --- End Configuration ---
 
 # --- Argument Parsing ---
@@ -108,11 +108,11 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
     CURRENT_DATE=$(date)
     USER_ROOT_LINE="USER root" # Line to switch to root user
     COMMENT_LINE="# Utilities and WP-CLI packages ensured by update script on $CURRENT_DATE"
-    WP_CLI_INSTALL_LINE="RUN ${WP_CLI_COMMAND}"
+    # WP_CLI_INSTALL_LINE="RUN ${WP_CLI_COMMAND}"
 
     # Define patterns to find and remove potentially existing old lines
     COMMENT_PATTERN_GREP="^# Utilities and WP-CLI packages ensured by update script"
-    WP_CLI_DOCTOR_PATTERN_GREP="RUN .*wp package install wp-cli/doctor-command"
+    # WP_CLI_DOCTOR_PATTERN_GREP="RUN .*wp package install wp-cli/doctor-command"
     USER_ROOT_PATTERN_GREP="^USER root" # Pattern to remove any existing USER root lines
 
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -120,11 +120,11 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
         echo " [DRY RUN]   - Would remove lines matching: $USER_ROOT_PATTERN_GREP" # Added for dry run
         echo " [DRY RUN]   - Would remove lines matching: $COMMENT_PATTERN_GREP"
         echo " [DRY RUN]   - Would remove lines matching specific old utilities pattern: $OLD_UTILITIES_LINE_REMOVAL_PATTERN"
-        echo " [DRY RUN]   - Would remove lines matching: $WP_CLI_DOCTOR_PATTERN_GREP"
+        # echo " [DRY RUN]   - Would remove lines matching: $WP_CLI_DOCTOR_PATTERN_GREP"
         echo " [DRY RUN]   - Would append: $USER_ROOT_LINE"
         echo " [DRY RUN]   - Would append: $COMMENT_LINE"
         echo " [DRY RUN]   - Would append: $FULL_UTILITIES_LINE" # New utilities line
-        echo " [DRY RUN]   - Would append: $WP_CLI_INSTALL_LINE"
+        # echo " [DRY RUN]   - Would append: $WP_CLI_INSTALL_LINE"
     else
         echo " [INFO] Updating Dockerfile: $DOCKERFILE"
         TEMP_DOCKERFILE=$(mktemp)
@@ -158,7 +158,7 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
         echo "$USER_ROOT_LINE" >> "$TEMP_DOCKERFILE" # Add USER root before other commands
         echo "$COMMENT_LINE" >> "$TEMP_DOCKERFILE"
         echo "$FULL_UTILITIES_LINE" >> "$TEMP_DOCKERFILE"
-        echo "$WP_CLI_INSTALL_LINE" >> "$TEMP_DOCKERFILE"
+        # echo "$WP_CLI_INSTALL_LINE" >> "$TEMP_DOCKERFILE"
 
         # Replace the original Dockerfile with the modified temporary file
         if mv "$TEMP_DOCKERFILE" "$DOCKERFILE"; then
