@@ -235,7 +235,7 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
     # 3. Validate (implicitly by build) and Restart/Build Docker Container
     if [[ "$DRY_RUN" == "true" ]]; then
         echo " [DRY RUN] Would change directory to $abs_dir"
-        echo " [DRY RUN] Would run: $DOCKER_COMPOSE_CMD up -d --build --remove-orphans"
+        echo " [DRY RUN] Would run: $DOCKER_COMPOSE_CMD up -d --build"
         echo " [DRY RUN] Would change directory back to original"
         echo " [DRY RUN] --- Finished processing $abs_dir ---"
     else
@@ -254,9 +254,8 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
         fi
 
         # Run docker-compose up with build
-        # Use --remove-orphans to clean up containers for services removed from the compose file
         # Use -d to run in detached mode
-        if $DOCKER_COMPOSE_CMD up -d --build --remove-orphans; then
+        if $DOCKER_COMPOSE_CMD up -d --build; then
             echo " [SUCCESS] Successfully updated, rebuilt, and restarted services in $abs_dir."
         else
             echo " [ERROR] Failed to build or restart services via $DOCKER_COMPOSE_CMD in $abs_dir."
