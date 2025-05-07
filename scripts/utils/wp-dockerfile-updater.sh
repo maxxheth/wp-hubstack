@@ -203,8 +203,10 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
             echo " [ERROR] Failed to build or restart services via $DOCKER_COMPOSE_CMD in $abs_dir."
             echo " [ERROR] Dockerfile validation likely failed. Check Docker output above."
             echo " [INFO] Restoring Dockerfile from backup: $BACKUP_FILE"
+            
+            cp $DOCKERFILE "${DOCKERFILE}_COPY" # Create a temporary copy of the backup
             # Attempt to restore the backup
-            if ! cp "$BACKUP_FILE" "$DOCKERFILE"; then
+            if ! mv "$BACKUP_FILE" "$DOCKERFILE"; then
                 echo " [CRITICAL] Failed to restore backup $BACKUP_FILE to $DOCKERFILE!"
             else
                 echo " [INFO] Backup restored."
