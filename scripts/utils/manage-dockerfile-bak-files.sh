@@ -7,7 +7,7 @@ APP_NAME=$(basename "$0")
 PARENT_DIR="."
 ACTION=""
 ALWAYS_YES=false
-SELECT_SITE_FLAG=false
+WP_SITE_DIRS_RAW="" # Added for --wp-site-dir
 DRY_RUN_MODE=false # Added for --dry-run
 
 # --- Helper Functions ---
@@ -17,10 +17,13 @@ display_help() {
     echo
     echo "Options:"
     echo "  --parent-dir <dir>         Specify the parent directory to search for WP sites (default: current directory '$PARENT_DIR')."
-    echo "  --select-wp-site           Prompt to select a specific WP site to manage. If not used, actions apply to all found WP sites."
+    echo "                             This is ignored if --wp-site-dir is used."
+    echo "  --wp-site-dir <dir1|dir2>  Specify specific WordPress site directory/directories to manage, separated by '|'."
+    echo "                             If used, --parent-dir is ignored for site discovery."
     echo
     echo "Actions (only one action can be performed per run):"
     echo "  --list-backups             List all Dockerfile.bak.* files (default action if no other action specified)."
+    echo "  --delete                   Interactively select a backup file to delete."
     echo "  --delete-all               Delete all Dockerfile.bak.* files for the selected/all site(s)."
     echo "  --delete-except-latest     Delete all Dockerfile.bak.* files except the most recent one."
     echo "  --delete-except-earliest   Delete all Dockerfile.bak.* files except the oldest (earliest) one."
@@ -33,10 +36,12 @@ display_help() {
     echo "  -h, --help                 Display this help message."
     echo
     echo "Examples:"
-    echo "  $APP_NAME --parent-dir /var/www --select-wp-site --restore-latest"
+    echo "  $APP_NAME --parent-dir /var/www --restore-latest # Operates on all sites found in /var/www"
+    echo "  $APP_NAME --wp-site-dir /var/www/site1 --restore-latest"
+    echo "  $APP_NAME --wp-site-dir \"/var/www/site1|/var/www/site2\" --delete-all -y"
     echo "  $APP_NAME --parent-dir /websites --delete-all -y"
     echo "  $APP_NAME # Lists backups in current directory's WP sites"
-    echo "  $APP_NAME --select-wp-site --restore"
+    echo "  $APP_NAME --wp-site-dir /var/www/mysite --restore"
     echo "  $APP_NAME --delete-except-earliest"
 }
 
@@ -68,10 +73,15 @@ else
             --parent-dir)
                 if [[ -z "$2" || "$2" == -* ]]; then echo "Error: --parent-dir requires an argument." >&2; display_help; exit 1; fi
                 TEMP_PARENT_DIR="$2"; shift 2 ;;
-            --select-wp-site) SELECT_SITE_FLAG=true; shift ;;
+            --wp-site-dir)
+                if [[ -z "$2" || "$2" == -* ]]; then echo "Error: --wp-site-dir requires an argument." >&2; display_help; exit 1; fi
+                WP_SITE_DIRS_RAW="$2"; shift 2 ;;
             --list-backups)
                 if [[ -n "$ACTION" ]]; then echo "Error: Only one action flag allowed. ('$ACTION' already set)" >&2; display_help; exit 1; fi
                 ACTION="list_backups"; ACTION_FLAG_COUNT=$((ACTION_FLAG_COUNT + 1)); shift ;;
+            --delete)
+                if [[ -n "$ACTION" ]]; then echo "Error: Only one action flag allowed. ('$ACTION' already set)" >&2; display_help; exit 1; fi
+                ACTION="delete"; ACTION_FLAG_COUNT=$((ACTION_FLAG_COUNT + 1)); shift ;;
             --delete-all)
                 if [[ -n "$ACTION" ]]; then echo "Error: Only one action flag allowed. ('$ACTION' already set)" >&2; display_help; exit 1; fi
                 ACTION="delete_all"; ACTION_FLAG_COUNT=$((ACTION_FLAG_COUNT + 1)); shift ;;
@@ -130,38 +140,6 @@ find_wp_sites() {
     done | grep . # Filter out potential empty lines
 }
 
-select_wp_site_interactive() {
-    declare -n sites_ref="$1" # Nameref for the array of site paths
-    local selected_path_out=""
-
-    if [[ ${#sites_ref[@]} -eq 0 ]]; then
-        echo "No WordPress sites found to select from in '$PARENT_DIR'." >&2
-        return 1
-    fi
-
-    echo "Available WordPress installations in '$PARENT_DIR':"
-    for i in "${!sites_ref[@]}"; do
-        echo "  $((i+1))) ${sites_ref[$i]}"
-    done
-
-    local choice
-    while true; do
-        read -r -p "Select a WP site by number (1-${#sites_ref[@]}), or 0 to cancel: " choice
-        if [[ "$choice" == "0" ]]; then
-            echo "Selection cancelled."
-            return 1
-        fi
-        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#sites_ref[@]} )); then
-            selected_path_out="${sites_ref[$((choice-1))]}"
-            break
-        else
-            echo "Invalid selection. Please enter a number between 1 and ${#sites_ref[@]}, or 0."
-        fi
-    done
-    echo "$selected_path_out" # Return the selected path via stdout
-    return 0
-}
-
 get_backup_files_newline_separated() {
     local site_dir="$1"
     local files_with_timestamps=()
@@ -196,6 +174,45 @@ perform_list_backups() {
         for backup_file in "${current_backups_ref[@]}"; do
             echo "    - $(basename "$backup_file")"
         done
+    fi
+}
+
+perform_delete_interactive() {
+    local current_site_path="$1"
+    declare -n current_backups_ref="$2"
+
+    if [[ ${#cwp package install wp-cli/doctor-commandurrent_backups_ref[@]} -eq 0 ]]; then
+        echo "  No backups available to delete for $current_site_path."
+        return
+    fi
+
+    echo "  Available backups for $current_site_path (sorted oldest to newest):"
+    for i in "${!current_backups_ref[@]}"; do
+        echo "    $((i+1))) $(basename "${current_backups_ref[$i]}")"
+    done
+
+    local choice selected_backup_path
+    while true; do
+        read -r -p "  Select a backup to delete (1-${#current_backups_ref[@]}), or 0 to cancel: " choice
+        if [[ "$choice" == "0" ]]; then echo "  Deletion cancelled."; return; fi
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#current_backups_ref[@]} )); then
+            selected_backup_path="${current_backups_ref[$((choice-1))]}"
+            break
+        else
+            echo "  Invalid selection. Please enter a number between 1 and ${#current_backups_ref[@]}, or 0."
+        fi
+    done
+
+    if confirm_action "  Are you sure you want to delete '$(basename "$selected_backup_path")' from $current_site_path?"; then
+        if [[ "$DRY_RUN_MODE" == "true" ]]; then
+            echo "  [DRY RUN] Would delete: $(basename "$selected_backup_path")"
+        elif rm "$selected_backup_path"; then
+            echo "  Deleted: $(basename "$selected_backup_path")"
+        else
+            echo "  ERROR: Failed to delete '$selected_backup_path'."
+        fi
+    else
+        echo "  Deletion cancelled by user for $current_site_path."
     fi
 }
 
@@ -436,29 +453,57 @@ if [[ "$DRY_RUN_MODE" == "true" ]]; then
     echo "*** DRY RUN MODE ENABLED - NO CHANGES WILL BE MADE ***"
     echo "-----------------------------------"
 fi
-echo "Searching for WordPress installations in: $PARENT_DIR"
-
-declare -a ALL_WP_SITES
-readarray -t ALL_WP_SITES < <(find_wp_sites "$PARENT_DIR")
-
-if [[ ${#ALL_WP_SITES[@]} -eq 0 ]]; then
-    echo "No WordPress installations found in '$PARENT_DIR'."
-    exit 0
-fi
 
 declare -a TARGET_SITES_ARRAY
-declare SELECTED_WP_SITE_PATH # To store the path if one is selected
 
-if [[ "$SELECT_SITE_FLAG" == "true" ]]; then
-    SELECTED_WP_SITE_PATH=$(select_wp_site_interactive "ALL_WP_SITES") # Pass array name
-    if [[ -n "$SELECTED_WP_SITE_PATH" ]]; then
-        TARGET_SITES_ARRAY=("$SELECTED_WP_SITE_PATH")
-        echo "Operating on selected site: $SELECTED_WP_SITE_PATH"
-    else
-        echo "No site selected or selection cancelled. Exiting."
-        exit 1
-    fi
+if [[ -n "$WP_SITE_DIRS_RAW" ]]; then
+    echo "Processing specified WordPress site directories from --wp-site-dir: $WP_SITE_DIRS_RAW"
+    IFS='|' read -r -a TARGET_SITES_ARRAY <<< "$WP_SITE_DIRS_RAW"
+    
+    # Validate specified directories
+    declare -a VALIDATED_TARGET_SITES_ARRAY
+    for site_path_candidate in "${TARGET_SITES_ARRAY[@]}"; do
+        # Attempt to resolve to a real path, handling potential relative paths
+        resolved_path_candidate=$(realpath -m "$site_path_candidate" 2>/dev/null)
+        if [[ -n "$resolved_path_candidate" && -d "$resolved_path_candidate" ]]; then
+            # Further check if it looks like a WP site by checking for wp-config.php
+            if [[ -f "$resolved_path_candidate/wp-config.php" ]]; then
+                VALIDATED_TARGET_SITES_ARRAY+=("$resolved_path_candidate")
+                echo "  Validated WP site: $resolved_path_candidate"
+            elif [[ -f "$resolved_path_candidate/www/wp-config.php" ]]; then # Handle common /www subdirectory
+                 VALIDATED_TARGET_SITES_ARRAY+=("$resolved_path_candidate/www")
+                 echo "  Validated WP site (in www subdir): $resolved_path_candidate/www"
+            else
+                 # If wp-config.php is not found, still add it but warn the user.
+                 # The backup functions will simply report no backups if it's not a valid structure.
+                 VALIDATED_TARGET_SITES_ARRAY+=("$resolved_path_candidate")
+                 echo "  Warning: Directory '$resolved_path_candidate' specified via --wp-site-dir does not contain a 'wp-config.php' or 'www/wp-config.php'. Processing anyway."
+            fi
+        elif [[ -d "$site_path_candidate" ]]; then # Fallback for paths realpath might not like but are valid dirs
+             if [[ -f "$site_path_candidate/wp-config.php" ]]; then
+                VALIDATED_TARGET_SITES_ARRAY+=("$site_path_candidate")
+                echo "  Validated WP site: $site_path_candidate"
+            elif [[ -f "$site_path_candidate/www/wp-config.php" ]]; then
+                 VALIDATED_TARGET_SITES_ARRAY+=("$site_path_candidate/www")
+                 echo "  Validated WP site (in www subdir): $site_path_candidate/www"
+            else
+                 VALIDATED_TARGET_SITES_ARRAY+=("$site_path_candidate")
+                 echo "  Warning: Directory '$site_path_candidate' specified via --wp-site-dir does not contain a 'wp-config.php' or 'www/wp-config.php'. Processing anyway."
+            fi
+        else
+            echo "  Error: Specified directory '$site_path_candidate' from --wp-site-dir does not exist or is not a directory. Skipping." >&2
+        fi
+    done
+    TARGET_SITES_ARRAY=("${VALIDATED_TARGET_SITES_ARRAY[@]}")
 else
+    echo "Searching for WordPress installations in: $PARENT_DIR"
+    declare -a ALL_WP_SITES
+    readarray -t ALL_WP_SITES < <(find_wp_sites "$PARENT_DIR")
+
+    if [[ ${#ALL_WP_SITES[@]} -eq 0 ]]; then
+        echo "No WordPress installations found in '$PARENT_DIR'."
+        exit 0
+    fi
     TARGET_SITES_ARRAY=("${ALL_WP_SITES[@]}")
     echo "Operating on all ${#TARGET_SITES_ARRAY[@]} found WordPress site(s)."
 fi
@@ -479,6 +524,7 @@ for site_path in "${TARGET_SITES_ARRAY[@]}"; do
 
     case "$ACTION" in
         list_backups) perform_list_backups "$site_path" current_site_backups ;;
+        delete) perform_delete_interactive "$site_path" current_site_backups ;;
         delete_all) perform_delete_all "$site_path" current_site_backups ;;
         delete_except_latest) perform_delete_except_latest "$site_path" current_site_backups ;;
         delete_except_earliest) perform_delete_except_earliest "$site_path" current_site_backups ;;
