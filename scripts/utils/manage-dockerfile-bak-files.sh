@@ -142,15 +142,27 @@ find_wp_sites() {
 
 get_backup_files_newline_separated() {
     local site_dir="$1"
+    echo "DEBUG: In get_backup_files_newline_separated for site_dir: $site_dir" >&2 # DEBUG
     local files_with_timestamps=()
+    local found_files_count=0       # DEBUG
+    local processed_files_count=0   # DEBUG
 
+    # Temporarily remove 2>/dev/null from find to see potential errors
     while IFS= read -r -d $'\0' filepath; do
+        ((found_files_count++)) # DEBUG
         filename=$(basename "$filepath")
+        echo "DEBUG: Found file by find: $filepath (filename: $filename)" >&2 # DEBUG
         timestamp=$(echo "$filename" | sed -n 's/^Dockerfile\.bak\.\([0-9]\{8\}_[0-9]\{6\}\).*/\1/p')
         if [[ -n "$timestamp" ]]; then
+            echo "DEBUG: Extracted timestamp '$timestamp' for file '$filename'" >&2 # DEBUG
             files_with_timestamps+=("${timestamp}"$'\0'"${filepath}")
+            ((processed_files_count++)) # DEBUG
+        else
+            echo "DEBUG: No valid timestamp found in filename '$filename'. Skipping." >&2 # DEBUG
         fi
-    done < <(find "$site_dir" -maxdepth 1 -type f -name 'Dockerfile.bak.*' -print0 2>/dev/null)
+    done < <(find "$site_dir" -maxdepth 1 -type f -name 'Dockerfile.bak.*' -print0) # Removed 2>/dev/null for debugging
+
+    echo "DEBUG: For $site_dir - Total files found by find: $found_files_count. Files processed with valid timestamp: $processed_files_count." >&2 # DEBUG
 
     if [[ ${#files_with_timestamps[@]} -gt 0 ]]; then
         printf "%s\0" "${files_with_timestamps[@]}" | \
@@ -158,6 +170,8 @@ get_backup_files_newline_separated() {
         while IFS= read -r -d $'\0' sorted_line; do
             echo "${sorted_line#*$'\0'}" # Extract and print filepath
         done
+    else
+        echo "DEBUG: No files with valid timestamps found to sort and output for $site_dir." >&2 # DEBUG
     fi
 }
 
@@ -181,7 +195,7 @@ perform_delete_interactive() {
     local current_site_path="$1"
     declare -n current_backups_ref="$2"
 
-    if [[ ${#cwp package install wp-cli/doctor-commandurrent_backups_ref[@]} -eq 0 ]]; then
+    if [[ ${#current_backups_ref[@]} -eq 0 ]]; then
         echo "  No backups available to delete for $current_site_path."
         return
     fi
