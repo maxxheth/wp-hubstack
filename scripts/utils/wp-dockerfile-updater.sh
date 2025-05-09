@@ -134,12 +134,33 @@ find "$PARENT_DIR" -maxdepth 3 -name 'wp-config.php' -printf '%h\n' | sed 's|/ww
     OLD_UTILITIES_LINE_REMOVAL_PATTERN="^RUN *$OLD_UTILITIES_CMD_CONTENT_ESCAPED_FOR_GREP"
 
     # The NEW utilities command string, without --no-install-recommends
-    UTILITIES_CMD_CONTENT="rm -rf /var/lib/apt/lists/* && apt-get update -y && apt-get install -y jq gawk curl git ca-certificates"
+    UTILITIES_CMD_CONTENT="apt-get update -y && apt-get install -y --no-install-recommends jq gawk curl git ca-certificates tar make wget && rm -rf /var/lib/apt/lists/*"
     FULL_UTILITIES_LINE="RUN $UTILITIES_CMD_CONTENT" # This is the new line to be added
 
     CURRENT_DATE=$(date)
     USER_ROOT_LINE="USER root" # Line to switch to root user
-    COMMENT_LINE="# Utilities and WP-CLI packages ensured by update script on $CURRENT_DATE"
+    COMMENT_LINE="# Utilities and WP-CLI packages ensured by update scrip# Choose a base image that uses apt (e.g., Ubuntu, Debian)
+FROM ubuntu:latest
+
+# It's a good practice to run apt-get update before installing packages.
+# Combining update and install in one RUN command reduces image layers.
+# The -y flag automatically confirms prompts during installation.
+# --no-install-recommends can help keep the image size smaller by avoiding
+# the installation of packages that are only recommended, not strictly required.
+# Finally, clean up the apt cache to reduce image size.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        tar \
+        make \
+        wget && \
+    rm -rf /var/lib/apt/lists/*
+
+# Your other Dockerfile instructions would follow
+# For example:
+# WORKDIR /app
+# COPY . /app
+# RUN make myapplication
+# CMD ["./myapplication"]t on $CURRENT_DATE"
     # WP_CLI_INSTALL_LINE="RUN ${WP_CLI_COMMAND}"
 
     # Define patterns to find and remove potentially existing old lines
