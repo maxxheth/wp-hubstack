@@ -22,6 +22,8 @@ REPORT_FORMAT="md" # Use 'md' or 'html'
 TARGET_DIR="$DEFAULT_TARGET_DIR"
 DRY_RUN_MODE=false # Initialize dry-run flag
 SUBDIR_PATH=""     # Initialize subdir path flag (relative path *within* CONTAINER_WP_PATH)
+EXCLUDE_CHECKS_ARG_BATCH="" # Added for --exclude-checks
+EXCLUDE_CONTAINERS_ARG="" # Added for --exclude-containers
 
 # --- Argument Parsing ---
 while [[ "$#" -gt 0 ]]; do
@@ -46,11 +48,18 @@ while [[ "$#" -gt 0 ]]; do
         --container-wp-path)
             if [[ -z "$2" || "$2" == --* ]]; then echo "ERROR: Missing value for --container-wp-path flag." >&2; exit 1; fi
             CONTAINER_WP_PATH="$2"; shift 2 ;;
+        --exclude-checks)
+            if [[ -z "$2" || "$2" == --* ]]; then echo "ERROR: Missing value for --exclude-checks flag." >&2; exit 1; fi
+            EXCLUDE_CHECKS_ARG_BATCH="$2"; shift 2 ;;
+        --exclude-containers)
+            if [[ -z "$2" || "$2" == --* ]]; then echo "ERROR: Missing value for --exclude-containers flag." >&2; exit 1; fi
+            EXCLUDE_CONTAINERS_ARG="$2"; shift 2 ;;
         *)
             echo "ERROR: Unknown option: $1" >&2
             echo "Usage: $0 [--target-dir <dir>] [--dry-run] [--subdir <path>]" >&2
             echo "          --local-update-script <host_script_path> --container-list-file <list_file_path>" >&2
             echo "          [--script-dest-in-container <container_script_path>] [--container-wp-path <path>]" >&2
+            echo "          [--exclude-checks <check1,check2|none>] [--exclude-containers <name1,name2>]" >&2
             exit 1
             ;;
     esac
@@ -98,6 +107,13 @@ echo "Local Update Script (Host Path): '$LOCAL_UPDATE_SCRIPT_PATH'"
 echo "Container List File (Host Path): '$CONTAINER_LIST_FILE'"
 echo "Update Script Destination (Container Path): '$SCRIPT_DEST_IN_CONTAINER'"
 echo "WordPress Path in Container: '$CONTAINER_WP_PATH'"
+if [[ -n "$EXCLUDE_CHECKS_ARG_BATCH" ]]; then
+    echo "WP Doctor Exclude Checks: '$EXCLUDE_CHECKS_ARG_BATCH'"
+fi
+if [[ -n "$EXCLUDE_CONTAINERS_ARG" ]]; then
+    echo "Exclude Containers List: '$EXCLUDE_CONTAINERS_ARG'"
+fi
+mapfile -t DOCKER_CONTAINER_NAMES < <(awk 'NR > 1 && $NF ~ /^wp_/ {print $NF}' "$CONTAINER_LIST_FILE")
 
 # Get the absolute path of the target directory on the host
 TARGET_DIR_ABS=$(realpath "$TARGET_DIR")
@@ -110,7 +126,7 @@ echo "Host Report Directory: $REPORT_BATCH_DIR_HOST"
 
 # Read and filter container names from the provided file
 echo "Reading container names from '$CONTAINER_LIST_FILE'..."
-mapfile -t DOCKER_CONTAINER_NAMES < <(awk 'NR > 1 && /ghcr\.io\/ciwebgroup\/advanced-wordpress/ {print $NF}' "$CONTAINER_LIST_FILE")
+
 
 if [ ${#DOCKER_CONTAINER_NAMES[@]} -eq 0 ]; then
     echo "No relevant WordPress containers found in '$CONTAINER_LIST_FILE' (expected image: ghcr.io/ciwebgroup/advanced-wordpress)."
@@ -123,6 +139,17 @@ echo "---"
 
 # Process each identified container
 for DOCKER_CONTAINER_NAME in "${DOCKER_CONTAINER_NAMES[@]}"; do
+
+    # Check if this container should be excluded
+    if [[ -n "$EXCLUDE_CONTAINERS_ARG" ]]; then
+        # Pad the exclude list and container name with commas for exact matching
+        if [[ ",$EXCLUDE_CONTAINERS_ARG," == *",$DOCKER_CONTAINER_NAME,"* ]]; then
+            echo "Skipping Container (excluded): $DOCKER_CONTAINER_NAME"
+            echo "---"
+            continue
+        fi
+    fi
+
     echo "Processing Container: $DOCKER_CONTAINER_NAME"
 
     # Sanitize container name for use in report filenames on the host
@@ -136,30 +163,26 @@ for DOCKER_CONTAINER_NAME in "${DOCKER_CONTAINER_NAMES[@]}"; do
         continue
     fi
 
-    # --- Make Script Executable in Container ---
-    echo "Making script executable at '$SCRIPT_DEST_IN_CONTAINER' inside container..."
-    if ! docker exec "$DOCKER_CONTAINER_NAME" chmod +x "$SCRIPT_DEST_IN_CONTAINER"; then
-        echo "ERROR: Failed to make script executable in container '$DOCKER_CONTAINER_NAME'. Attempting to remove script and skipping." >&2
-        docker exec "$DOCKER_CONTAINER_NAME" rm -f "$SCRIPT_DEST_IN_CONTAINER" &>/dev/null
-        echo "---"
-        continue
-    fi
-
     # --- Prepare for Execution ---
     report_filename_in_container="update-results.$REPORT_FORMAT"
     report_dest_path_host="$REPORT_BATCH_DIR_HOST/${sanitized_container_name}-${report_filename_in_container}"
     report_source_path_container="$CONTAINER_WP_PATH/$report_filename_in_container"
 
-    SCRIPT_ARGS=("--print-results=$REPORT_FORMAT")
+    SCRIPT_ARGS=() # Initialize as an empty array
+    SCRIPT_ARGS+=("--print-results" "$REPORT_FORMAT") # Pass option and its value as separate arguments
+
     if [ "$DRY_RUN_MODE" = true ]; then
         SCRIPT_ARGS+=("--dry-run")
     fi
     if [[ -n "$SUBDIR_PATH" ]]; then
         SCRIPT_ARGS+=("--subdir" "$SUBDIR_PATH")
     fi
-    SCRIPT_ARGS+=("$CONTAINER_WP_PATH")
+    if [[ -n "$EXCLUDE_CHECKS_ARG_BATCH" ]]; then
+        SCRIPT_ARGS+=("--exclude-checks" "$EXCLUDE_CHECKS_ARG_BATCH")
+    fi
+    SCRIPT_ARGS+=("$CONTAINER_WP_PATH") # Add the positional WordPress path last
 
-    DOCKER_EXEC_CMD=(docker exec -i "$DOCKER_CONTAINER_NAME" bash -c "$SCRIPT_DEST_IN_CONTAINER ${SCRIPT_ARGS[*]@Q}")
+    DOCKER_EXEC_CMD=(docker exec -i "$DOCKER_CONTAINER_NAME" bash "$SCRIPT_DEST_IN_CONTAINER" "${SCRIPT_ARGS[@]}")
 
     # --- Run Script in Container ---
     echo "Running update script '$SCRIPT_DEST_IN_CONTAINER' inside container '$DOCKER_CONTAINER_NAME'..."
