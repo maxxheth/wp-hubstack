@@ -11,6 +11,8 @@ SUBDIR_PATH="" # Relative path to WP install within WP_DIR
 ALLOW_CHECK_ERRORS=false # Default: Exit on WP Doctor errors
 PRINT_RESULTS_FORMAT="" # md, html, or empty (no report)
 DRY_RUN_FLAG=false # Default: Perform actual updates and backups
+DISABLE_JQ_FLAG=false # Default: Use jq if available or try to install it
+DISABLE_WGET_FLAG=false # Default: Use wget if needed (e.g. for jq install)
 # Default checks to exclude from WP Doctor error check
 # Can be overridden by --exclude-checks flag. Use "none" to exclude nothing.
 EXCLUDE_CHECKS_ARG="core-update"
@@ -39,6 +41,11 @@ DOCTOR_CHECK_MESSAGES=()
 error_exit() {
     echo "ERROR: $1" >&2
     # Optional: Add cleanup steps here if needed before exiting
+    # Ensure results are printed on error if a format was specified and arrays are populated
+    if [[ -n "$PRINT_RESULTS_FORMAT" && (${#PLUGINS_TO_UPDATE[@]} -gt 0 || ${#DOCTOR_CHECK_NAMES_RUN[@]} -gt 0) ]]; then
+        echo "INFO: Attempting to generate results file before exiting due to error..."
+        generate_results_file "$PRINT_RESULTS_FORMAT"
+    fi
     exit 1
 }
 
@@ -108,6 +115,8 @@ while [[ "$#" -gt 0 ]]; do
         --bedrock) BEDROCK_MODE=true; shift ;; # Set bedrock mode and remove the flag
         --allow-check-errors) ALLOW_CHECK_ERRORS=true; shift ;; # Allow script to continue despite WP Doctor errors
         --dry-run) DRY_RUN_FLAG=true; shift ;; # Enable dry run mode
+        --disable-jq) DISABLE_JQ_FLAG=true; shift ;; # Disable jq usage and installation
+        --disable-wget) DISABLE_WGET_FLAG=true; shift ;; # Disable wget usage and installation
         --subdir) # Handle subdir path
              if [[ -z "$2" || "$2" == --* ]]; then
                  error_exit "Missing value for --subdir flag."
@@ -154,7 +163,7 @@ done
 # --- Pre-flight Checks ---
 # Check if WP_DIR argument was captured
 if [ -z "$WP_DIR" ]; then
-    error_exit "Usage: $0 [--bedrock] [--dry-run] [--subdir <relative_path>] [--allow-check-errors] [--exclude-checks <check1,check2|none>] [--print-results[=md|html]] <path_to_wordpress_directory>"
+    error_exit "Usage: $0 [--bedrock] [--dry-run] [--disable-jq] [--disable-wget] [--subdir <relative_path>] [--allow-check-errors] [--exclude-checks <check1,check2|none>] [--print-results[=md|html]] <path_to_wordpress_directory>"
 fi
 
 # Check if WP_DIR is a directory
@@ -167,122 +176,159 @@ if ! command -v wp &> /dev/null; then
     error_exit "WP-CLI command 'wp' not found. Please install it."
 fi
 
-# Check if jq is installed (needed for wp doctor list and plugin checks)
-if ! command -v jq &> /dev/null; then
-    echo "INFO: 'jq' command not found. Attempting to install from source..."
-    # Assuming script is run as root, sudo is not needed for apt-get or make install.
-
-    # Check for wget
-    if ! command -v wget &> /dev/null; then
-        echo "INFO: 'wget' not found. Attempting to install via apt-get..."
-        if ! command -v apt-get &> /dev/null; then
-            error_exit "wget is not installed, and apt-get is not available. Please install wget manually."
-        fi
-        resolve_apt_locks
-        if ! apt-get install -y wget; then
-            error_exit "Failed to install wget using apt-get. Please install it manually."
-        fi
-        echo "INFO: wget installed successfully."
-    fi
-
-    # Check for tar
-    if ! command -v tar &> /dev/null; then
-        echo "INFO: 'tar' not found. Attempting to install via apt-get..."
-        if ! command -v apt-get &> /dev/null; then
-            error_exit "tar is not installed, and apt-get is not available. Please install tar manually."
-        fi
-        resolve_apt_locks
-        if ! apt-get install -y tar; then
-            error_exit "Failed to install tar using apt-get. Please install it manually."
-        fi
-        echo "INFO: tar installed successfully."
-    fi
-
-    # Check for make and build essentials (common for ./configure && make)
-    if ! command -v make &> /dev/null; then
-        echo "INFO: 'make' not found. Attempting to install 'make' and 'build-essential' via apt-get..."
-        if ! command -v apt-get &> /dev/null; then
-            error_exit "make is not installed, and apt-get is not available. Please install make and build tools (e.g., build-essential) manually."
-        fi
-        resolve_apt_locks
-        # build-essential usually includes gcc, etc. needed for ./configure
-        if ! apt-get install -y make build-essential; then
-            error_exit "Failed to install make/build-essential using apt-get. Please install them manually."
-        fi
-        echo "INFO: make and build-essential installed successfully."
-    fi
-
-    JQ_VERSION="1.7.1"
-    JQ_DOWNLOAD_URL="https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-${JQ_VERSION}.tar.gz"
-    JQ_TARBALL="jq-${JQ_VERSION}.tar.gz"
-    JQ_SOURCE_DIR="jq-${JQ_VERSION}"
-    TEMP_BUILD_DIR=$(mktemp -d)
-
-    echo "INFO: Downloading jq from $JQ_DOWNLOAD_URL..."
-    if ! wget -O "$TEMP_BUILD_DIR/$JQ_TARBALL" "$JQ_DOWNLOAD_URL"; then
-        rm -rf "$TEMP_BUILD_DIR"
-        error_exit "Failed to download jq tarball."
-    fi
-
-    echo "INFO: Extracting jq tarball..."
-    if ! tar -xzf "$TEMP_BUILD_DIR/$JQ_TARBALL" -C "$TEMP_BUILD_DIR"; then
-        rm -rf "$TEMP_BUILD_DIR"
-        error_exit "Failed to extract jq tarball."
-    fi
-
-    cd "$TEMP_BUILD_DIR/$JQ_SOURCE_DIR" || { rm -rf "$TEMP_BUILD_DIR"; error_exit "Failed to change directory to jq source."; }
-
-    echo "INFO: Configuring jq..."
-    if ! ./configure --with-oniguruma=builtin; then # Add --with-oniguruma=builtin to avoid libonig-dev dependency
-        cd "$WP_DIR" # Go back to original WP_DIR on failure
-        rm -rf "$TEMP_BUILD_DIR"
-        error_exit "Failed to configure jq. Check if build tools (gcc, autoconf, automake, libtool) are installed."
-    fi
-
-    echo "INFO: Compiling jq (make)..."
-    if ! make -j"$(nproc)"; then
-        cd "$WP_DIR"
-        rm -rf "$TEMP_BUILD_DIR"
-        error_exit "Failed to compile jq using make."
-    fi
-
-    echo "INFO: Installing jq (make install)..."
-    if ! make install; then
-        cd "$WP_DIR"
-        rm -rf "$TEMP_BUILD_DIR"
-        error_exit "Failed to install jq using make install."
-    fi
-
-    cd "$WP_DIR" # Change back to the original WordPress directory
-    rm -rf "$TEMP_BUILD_DIR" # Clean up
-
+# Check if jq is installed (needed for wp doctor list and plugin checks if not disabled)
+if [ "$DISABLE_JQ_FLAG" = false ]; then
     if ! command -v jq &> /dev/null; then
-        error_exit "jq installation from source completed, but 'jq' command still not found. Check PATH or installation."
+        echo "INFO: 'jq' command not found. Attempting to install from source..."
+        # Assuming script is run as root, sudo is not needed for apt-get or make install.
+
+        # Check for wget
+        if ! command -v wget &> /dev/null; then
+            if [ "$DISABLE_WGET_FLAG" = true ]; then
+                error_exit "jq needs to be installed, but wget is disabled (--disable-wget) and wget command is not found. Please install jq or wget manually, or enable wget usage."
+            fi
+            echo "INFO: 'wget' not found. Attempting to install via apt-get..."
+            if ! command -v apt-get &> /dev/null; then
+                error_exit "wget is not installed (needed for jq source install), and apt-get is not available. Please install wget manually or ensure jq is already installed."
+            fi
+            resolve_apt_locks
+            if ! apt-get install -y wget; then
+                error_exit "Failed to install wget using apt-get (needed for jq source install). Please install it manually or ensure jq is already installed."
+            fi
+            echo "INFO: wget installed successfully."
+        fi
+
+        # Check for tar (already checked below, but good to ensure it's available before wget for jq)
+        if ! command -v tar &> /dev/null; then
+            echo "INFO: 'tar' not found (needed for jq source install). Attempting to install via apt-get..."
+            if ! command -v apt-get &> /dev/null; error_exit "tar is not installed, and apt-get is not available. Please install tar manually."; fi
+            resolve_apt_locks
+            if ! apt-get install -y tar; then error_exit "Failed to install tar using apt-get."; fi
+            echo "INFO: tar installed successfully."
+        fi
+        
+        # Check for make and build essentials (common for ./configure && make)
+        if ! command -v make &> /dev/null; then
+            echo "INFO: 'make' not found (needed for jq source install). Attempting to install 'make' and 'build-essential' via apt-get..."
+            if ! command -v apt-get &> /dev/null; error_exit "make is not installed, and apt-get is not available. Please install them manually."; fi
+            resolve_apt_locks
+            if ! apt-get install -y make build-essential; then error_exit "Failed to install make/build-essential using apt-get."; fi
+            echo "INFO: make and build-essential installed successfully."
+        fi
+
+        JQ_VERSION="1.7.1"
+        JQ_DOWNLOAD_URL="https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-${JQ_VERSION}.tar.gz"
+        JQ_TARBALL="jq-${JQ_VERSION}.tar.gz"
+        JQ_SOURCE_DIR="jq-${JQ_VERSION}"
+        TEMP_BUILD_DIR=$(mktemp -d)
+
+        echo "INFO: Downloading jq from $JQ_DOWNLOAD_URL..."
+        if ! wget -O "$TEMP_BUILD_DIR/$JQ_TARBALL" "$JQ_DOWNLOAD_URL"; then
+            rm -rf "$TEMP_BUILD_DIR"
+            error_exit "Failed to download jq tarball. wget might be blocked or URL is invalid."
+        fi
+
+        echo "INFO: Extracting jq tarball..."
+        if ! tar -xzf "$TEMP_BUILD_DIR/$JQ_TARBALL" -C "$TEMP_BUILD_DIR"; then
+            rm -rf "$TEMP_BUILD_DIR"
+            error_exit "Failed to extract jq tarball."
+        fi
+
+        cd "$TEMP_BUILD_DIR/$JQ_SOURCE_DIR" || { rm -rf "$TEMP_BUILD_DIR"; error_exit "Failed to change directory to jq source."; }
+
+        echo "INFO: Configuring jq..."
+        if ! ./configure --with-oniguruma=builtin; then
+            cd "$WP_DIR" 
+            rm -rf "$TEMP_BUILD_DIR"
+            error_exit "Failed to configure jq. Check if build tools (gcc, autoconf, automake, libtool) are installed."
+        fi
+
+        echo "INFO: Compiling jq (make)..."
+        if ! make -j"$(nproc)"; then
+            cd "$WP_DIR"
+            rm -rf "$TEMP_BUILD_DIR"
+            error_exit "Failed to compile jq using make."
+        fi
+
+        echo "INFO: Installing jq (make install)..."
+        if ! make install; then
+            cd "$WP_DIR"
+            rm -rf "$TEMP_BUILD_DIR"
+            error_exit "Failed to install jq using make install. Check permissions or previous conflicting jq installations."
+        fi
+
+        cd "$WP_DIR" 
+        rm -rf "$TEMP_BUILD_DIR" 
+
+        if ! command -v jq &> /dev/null; then
+            error_exit "jq installation from source completed, but 'jq' command still not found. Check PATH or installation."
+        fi
+        echo "INFO: jq installed successfully from source."
+    else
+        echo "INFO: 'jq' command found."
     fi
-    echo "INFO: jq installed successfully from source."
 else
-    echo "INFO: 'jq' command found."
+    echo "INFO: jq usage is disabled via --disable-jq. Using awk for parsing where possible."
+    # awk becomes critical if jq is disabled
+    if ! command -v awk &> /dev/null; then
+        echo "INFO: 'awk' command not found (and jq is disabled). Attempting to install 'gawk'..."
+        # (awk installation logic is present below, it will be hit)
+    fi
 fi
 
-# Check if awk is installed (needed for preparing exclusion list), try to install gawk if not
+# Check for tar (if not already handled by jq install block)
+if ! command -v tar &> /dev/null; then
+    echo "INFO: 'tar' not found. Attempting to install via apt-get..."
+    if ! command -v apt-get &> /dev/null; then
+        error_exit "tar is not installed, and apt-get is not available. Please install tar manually."
+    fi
+    resolve_apt_locks
+    if ! apt-get install -y tar; then
+        error_exit "Failed to install tar using apt-get. Please install it manually."
+    fi
+    echo "INFO: tar installed successfully."
+fi
+
+
+# Check if awk is installed (needed for preparing exclusion list and as jq fallback)
 if ! command -v awk &> /dev/null; then
     echo "INFO: 'awk' command not found. Attempting to install 'gawk'..."
     if ! command -v apt-get &> /dev/null; then
-        error_exit "awk is not installed, and apt-get is not available. Please install gawk manually."
-    fi
-    # Assuming script is run as root, sudo is not needed for apt-get.
-    echo "INFO: Running: apt-get install -y gawk (after lock resolution)"
-    resolve_apt_locks
-    if apt-get install -y gawk; then
-        echo "INFO: gawk installed successfully."
-        if ! command -v awk &> /dev/null; then # Verify awk is now available
-             error_exit "Verification failed after attempting to install gawk (awk command still not found). Please check the installation."
+        # If jq is disabled, awk is critical.
+        if [ "$DISABLE_JQ_FLAG" = true ]; then
+            error_exit "awk is not installed (and jq is disabled), and apt-get is not available. Please install gawk manually."
+        else
+            warning_msg "awk is not installed, and apt-get is not available. Some operations might fail if jq is also unavailable. Please install gawk manually."
         fi
     else
-        error_exit "Failed to install gawk using apt-get. Please install it manually."
+        echo "INFO: Running: apt-get install -y gawk (after lock resolution)"
+        resolve_apt_locks
+        if apt-get install -y gawk; then
+            echo "INFO: gawk installed successfully."
+            if ! command -v awk &> /dev/null; then 
+                 if [ "$DISABLE_JQ_FLAG" = true ]; then
+                     error_exit "Verification failed after attempting to install gawk (awk command still not found, and jq is disabled)."
+                 else
+                     warning_msg "Verification failed after attempting to install gawk (awk command still not found)."
+                 fi
+            fi
+        else
+            if [ "$DISABLE_JQ_FLAG" = true ]; then
+                error_exit "Failed to install gawk using apt-get (and jq is disabled). Please install it manually."
+            else
+                warning_msg "Failed to install gawk using apt-get. Some operations might fail if jq is also unavailable."
+            fi
+        fi
     fi
+elif [ "$DISABLE_JQ_FLAG" = true ]; then
+     echo "INFO: 'awk' command found (critical as jq is disabled)."
 else
     echo "INFO: 'awk' command found."
+fi
+
+# Final check for jq if it was supposed to be enabled
+if [ "$DISABLE_JQ_FLAG" = false ] && ! command -v jq &> /dev/null; then
+    error_exit "jq is enabled but not found, and installation attempts failed. Please install jq manually or use --disable-jq."
 fi
 
 # --- Set Paths Based on Mode ---
@@ -582,29 +628,45 @@ else
   echo "Found plugins: ${PLUGIN_SLUGS[*]}"
   for plugin_slug in "${PLUGIN_SLUGS[@]}"; do
       echo "Checking update status for: $plugin_slug"
-      # Use --dry-run with JSON output to check for updates without applying them
-      # Capture stderr for this command too
       PLUGIN_UPDATE_CHECK_STDERR_FILE=$(mktemp)
-      # Use WP_CMD
-      update_info=$(${WP_CMD} plugin update "$plugin_slug" --dry-run --format=json 2> "$PLUGIN_UPDATE_CHECK_STDERR_FILE" || echo "[]") # Default to empty JSON array on error
-      PLUGIN_UPDATE_CHECK_ERROR_MSG=$(<"$PLUGIN_UPDATE_CHECK_STDERR_FILE")
-      rm -f "$PLUGIN_UPDATE_CHECK_STDERR_FILE"
-      if [[ -n "$PLUGIN_UPDATE_CHECK_ERROR_MSG" && "$update_info" == "[]" ]]; then
-          # If there was an error and no update info was returned, log it
-          warning_msg "Could not check update status for '$plugin_slug'. WP-CLI stderr:\n${PLUGIN_UPDATE_CHECK_ERROR_MSG}"
-      fi
-
-
-      # Check if the JSON array returned by --dry-run is empty or not
       update_available=0
-      # Use jq to safely check length
-      if echo "$update_info" | jq 'length > 0' &>/dev/null; then
-          update_available=1
+
+      if [ "$DISABLE_JQ_FLAG" = false ]; then
+          # Use --dry-run with JSON output to check for updates without applying them
+          update_info=$(${WP_CMD} plugin update "$plugin_slug" --dry-run --format=json 2> "$PLUGIN_UPDATE_CHECK_STDERR_FILE" || echo "[]") 
+          PLUGIN_UPDATE_CHECK_ERROR_MSG=$(<"$PLUGIN_UPDATE_CHECK_STDERR_FILE")
+          if [[ -n "$PLUGIN_UPDATE_CHECK_ERROR_MSG" && "$update_info" == "[]" ]]; then
+              warning_msg "Could not check update status for '$plugin_slug' (JSON). WP-CLI stderr:\n${PLUGIN_UPDATE_CHECK_ERROR_MSG}"
+          fi
+          # Check if the JSON array returned by --dry-run is empty or not
+          if echo "$update_info" | jq 'length > 0' &>/dev/null; then
+              update_available=1
+          fi
+      else
+          # Use `wp plugin list --name=<slug> --field=update --format=csv` if jq is disabled
+          # Output: header "update", then value "available", "none", or "unavailable"
+          plugin_update_status_output=$(${WP_CMD} plugin list --name="$plugin_slug" --field=update --format=csv 2> "$PLUGIN_UPDATE_CHECK_STDERR_FILE")
+          PLUGIN_UPDATE_CHECK_ERROR_MSG=$(<"$PLUGIN_UPDATE_CHECK_STDERR_FILE")
+
+          if [[ -n "$PLUGIN_UPDATE_CHECK_ERROR_MSG" && -z "$plugin_update_status_output" ]]; then
+               warning_msg "Could not check update status for '$plugin_slug' (CSV). WP-CLI stderr:\n${PLUGIN_UPDATE_CHECK_ERROR_MSG}"
+          else
+              # Get the actual status value (second line of CSV output)
+              current_plugin_update_status=$(echo "$plugin_update_status_output" | awk 'NR==2 {print $1}')
+              if [[ "$current_plugin_update_status" == "available" ]]; then
+                  update_available=1
+              elif [[ -n "$PLUGIN_UPDATE_CHECK_ERROR_MSG" ]]; then # Log error if CSV output was present but also an error
+                  warning_msg "Error while checking update status for '$plugin_slug' (CSV), though some output was received. WP-CLI stderr:\n${PLUGIN_UPDATE_CHECK_ERROR_MSG}"
+              fi
+          fi
+      fi
+      rm -f "$PLUGIN_UPDATE_CHECK_STDERR_FILE" 
+
+      if [ "$update_available" -eq 1 ]; then
           echo "  Update available for $plugin_slug."
       else
           echo "  No update needed for $plugin_slug."
       fi
-      # Append status to the file: plugin-name|status (1 for update available, 0 otherwise)
       echo "${plugin_slug}|${update_available}" >> "$UPDATE_STATUS_FILE"
   done
 fi
@@ -835,7 +897,7 @@ else
     echo "Skipping plugin updates (Dry Run)."
     # Populate PLUGINS_TO_UPDATE list for dry run report
      while IFS='|' read -r plugin_slug update_flag || [[ -n "$plugin_slug" ]]; do
-        if [ -z "$plugin_slug" ]; then continue; fi
+        if [ -z "$plugin_slug" ];then continue; fi
         if [ "$update_flag" -eq 1 ]; then
             PLUGINS_TO_UPDATE+=("$plugin_slug")
             echo "  Plugin needing update (Dry Run): $plugin_slug"
@@ -848,7 +910,7 @@ fi
 
 # 6. Generate Results File (if requested)
 if [[ -n "$PRINT_RESULTS_FORMAT" ]]; then
-    generate_results_file "$PRINT_RESULTS_FORMAT"
+   generate_results_file "$PRINT_RESULTS_FORMAT"
 fi
 
 
