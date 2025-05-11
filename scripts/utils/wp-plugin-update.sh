@@ -684,7 +684,7 @@ else
   echo "Found plugins: ${PLUGIN_SLUGS[*]}"
   for plugin_slug in "${PLUGIN_SLUGS[@]}"; do
       echo "Checking update status for: $plugin_slug"
-      local update_status_for_file=0 # 0 = no update, 1 = update available
+      update_status_for_file=0 # 0 = no update, 1 = update available
 
       if check_single_plugin_update_status "$plugin_slug"; then
           # Function returned 0 (shell true) => update is available
@@ -817,7 +817,6 @@ for check_name in "${DOCTOR_CHECK_NAMES[@]}"; do
     # Use --format=json and WP_CMD
     if ! CHECK_RESULT_JSON=$(WP_CLI_PHP_ARGS="-d memory_limit=512M" ${WP_CMD} doctor check "$check_name" --format=json 2> "$CHECK_STDERR_FILE"); then
         # Command itself failed (e.g., check doesn't exist, WP-CLI error)
-        local check_stderr_content
         check_stderr_content=$(<"$CHECK_STDERR_FILE")
         echo "Failed (command error)"
         DOCTOR_CHECK_STATUSES+=("failed_to_run")
@@ -829,8 +828,8 @@ for check_name in "${DOCTOR_CHECK_NAMES[@]}"; do
         fi
     else
         # Command executed, CHECK_RESULT_JSON should have output. Now parse it.
-        local check_status
-        local check_message
+        check_status=""
+        check_message=""
 
         # Attempt to parse status and message using jq
         # Handle cases where CHECK_RESULT_JSON might not be valid JSON or fields are missing
@@ -839,8 +838,7 @@ for check_name in "${DOCTOR_CHECK_NAMES[@]}"; do
             check_message=$(echo "$CHECK_RESULT_JSON" | jq -r '.message')
         else
             # JSON is invalid or status field is missing
-            local check_stderr_content # Check stderr from the command execution
-            check_stderr_content=$(<"$CHECK_STDERR_FILE")
+            check_stderr_content=$(<"$CHECK_STDERR_FILE") # Check stderr from the command execution
             check_status="unknown" # Mark as unknown if parsing fails
             check_message="Could not parse JSON result or 'status' field missing. Raw output: '$CHECK_RESULT_JSON'. Stderr: '$check_stderr_content'"
         fi
@@ -855,7 +853,7 @@ for check_name in "${DOCTOR_CHECK_NAMES[@]}"; do
         # Handle errors based on status if not excluded
         # Only consider "error" status as a failure for DOCTOR_ERRORS_FOUND
         if [[ "$check_status" == "error" ]]; then
-            local error_entry="Doctor check '$check_name' reported status '$check_status': $check_message"
+            error_entry="Doctor check '$check_name' reported status '$check_status': $check_message"
             warning_msg "$error_entry" # Also echo to console as a warning
             if [[ "$ALLOW_CHECK_ERRORS" = false ]]; then
                 DOCTOR_ERRORS_FOUND+=("$error_entry")
