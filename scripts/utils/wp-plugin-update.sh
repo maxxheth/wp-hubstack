@@ -253,11 +253,11 @@ if [ "$DISABLE_JQ_FLAG" = false ]; then
             fi
             echo "INFO: wget installed successfully."
         fi
-
+        
         # Check for tar (already checked below, but good to ensure it's available before wget for jq)
         if ! command -v tar &> /dev/null; then
             echo "INFO: 'tar' not found (needed for jq source install). Attempting to install via apt-get..."
-            if ! command -v apt-get &> /dev/null; error_exit "tar is not installed, and apt-get is not available. Please install tar manually."; fi
+            if ! command -v apt-get &> /dev/null; then error_exit "tar is not installed, and apt-get is not available. Please install tar manually."; fi
             resolve_apt_locks
             if ! apt-get install -y tar; then error_exit "Failed to install tar using apt-get."; fi
             echo "INFO: tar installed successfully."
@@ -266,7 +266,7 @@ if [ "$DISABLE_JQ_FLAG" = false ]; then
         # Check for make and build essentials (common for ./configure && make)
         if ! command -v make &> /dev/null; then
             echo "INFO: 'make' not found (needed for jq source install). Attempting to install 'make' and 'build-essential' via apt-get..."
-            if ! command -v apt-get &> /dev/null; error_exit "make is not installed, and apt-get is not available. Please install them manually."; fi
+            if ! command -v apt-get &> /dev/null; then error_exit "make is not installed, and apt-get is not available. Please install them manually."; fi
             resolve_apt_locks
             if ! apt-get install -y make build-essential; then error_exit "Failed to install make/build-essential using apt-get."; fi
             echo "INFO: make and build-essential installed successfully."
