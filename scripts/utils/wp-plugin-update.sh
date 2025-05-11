@@ -13,6 +13,7 @@ PRINT_RESULTS_FORMAT="" # md, html, or empty (no report)
 DRY_RUN_FLAG=false # Default: Perform actual updates and backups
 DISABLE_JQ_FLAG=false # Default: Use jq if available or try to install it
 DISABLE_WGET_FLAG=false # Default: Use wget if needed (e.g. for jq install)
+UPDATE_ALL_FLAG=false # Default: Update plugins individually
 # Default checks to exclude from WP Doctor error check
 # Can be overridden by --exclude-checks flag. Use "none" to exclude nothing.
 EXCLUDE_CHECKS_ARG="core-update"
@@ -25,6 +26,7 @@ UPDATES_NEEDED_LOG="updates_needed.log" # Renamed for clarity
 # Results file names
 MARKDOWN_RESULTS_FILE="update-results.md"
 HTML_RESULTS_FILE="update-results.html"
+_PLUGIN_CHECK_ERROR_MSG=""
 
 # Arrays to store update results for reporting
 PLUGINS_TO_UPDATE=() # Store plugins identified as needing updates
@@ -51,6 +53,59 @@ error_exit() {
 
 warning_msg() {
     echo "WARNING: $1" >&2
+}
+
+# Helper function to check if a specific plugin has an update available
+# Returns 0 (shell true) if update IS available.
+# Returns 1 (shell false) if NO update is available OR an error occurred.
+# Populates global _PLUGIN_CHECK_ERROR_MSG if an error occurs during check.
+check_single_plugin_update_status() {
+    local plugin_slug_to_check="$1"
+    local is_update_available_return_code=1 # Default to 1 (no update / error)
+    _PLUGIN_CHECK_ERROR_MSG="" # Reset global error message
+    local check_stderr_file
+    check_stderr_file=$(mktemp)
+
+    if [ "$DISABLE_JQ_FLAG" = false ]; then
+        local update_info
+        update_info=$(${WP_CMD} plugin update "$plugin_slug_to_check" --dry-run --format=json 2> "$check_stderr_file" || echo "[]")
+        _PLUGIN_CHECK_ERROR_MSG=$(<"$check_stderr_file")
+        if [[ -n "$_PLUGIN_CHECK_ERROR_MSG" && "$update_info" == "[]" ]]; then
+            # Error occurred, message stored in _PLUGIN_CHECK_ERROR_MSG
+            is_update_available_return_code=1
+        elif echo "$update_info" | jq 'length > 0' &>/dev/null; then
+            is_update_available_return_code=0 # Update available
+            _PLUGIN_CHECK_ERROR_MSG="" # Clear error message on success
+        else
+            # No update available (empty JSON array) or jq error
+            is_update_available_return_code=1
+        fi
+    else
+        local plugin_update_status_output
+        plugin_update_status_output=$(${WP_CMD} plugin list --name="$plugin_slug_to_check" --field=update --format=csv 2> "$check_stderr_file")
+        _PLUGIN_CHECK_ERROR_MSG=$(<"$check_stderr_file")
+
+        if [[ -n "$_PLUGIN_CHECK_ERROR_MSG" && -z "$plugin_update_status_output" ]]; then
+            is_update_available_return_code=1
+        else
+            local current_plugin_update_status
+            current_plugin_update_status=$(echo "$plugin_update_status_output" | awk 'NR==2 {print $1}')
+            if [[ "$current_plugin_update_status" == "available" ]]; then
+                is_update_available_return_code=0 # Update available
+                if [[ -n "$_PLUGIN_CHECK_ERROR_MSG" && ! "$_PLUGIN_CHECK_ERROR_MSG" =~ "No update available for" ]]; then
+                     : # Keep the error message for potential logging by caller
+                else
+                    _PLUGIN_CHECK_ERROR_MSG="" # Clear if no significant error
+                fi
+            else
+                is_update_available_return_code=1
+                # If _PLUGIN_CHECK_ERROR_MSG is empty but status is not "available", it's just no update.
+                # If _PLUGIN_CHECK_ERROR_MSG has content, it's an error or "no update" message.
+            fi
+        fi
+    fi
+    rm -f "$check_stderr_file"
+    return "$is_update_available_return_code"
 }
 
 # Helper function to attempt to resolve apt/dpkg lock issues
@@ -117,6 +172,7 @@ while [[ "$#" -gt 0 ]]; do
         --dry-run) DRY_RUN_FLAG=true; shift ;; # Enable dry run mode
         --disable-jq) DISABLE_JQ_FLAG=true; shift ;; # Disable jq usage and installation
         --disable-wget) DISABLE_WGET_FLAG=true; shift ;; # Disable wget usage and installation
+        --update-all) UPDATE_ALL_FLAG=true; shift ;; # Enable updating all plugins at once
         --subdir) # Handle subdir path
              if [[ -z "$2" || "$2" == --* ]]; then
                  error_exit "Missing value for --subdir flag."
@@ -163,7 +219,7 @@ done
 # --- Pre-flight Checks ---
 # Check if WP_DIR argument was captured
 if [ -z "$WP_DIR" ]; then
-    error_exit "Usage: $0 [--bedrock] [--dry-run] [--disable-jq] [--disable-wget] [--subdir <relative_path>] [--allow-check-errors] [--exclude-checks <check1,check2|none>] [--print-results[=md|html]] <path_to_wordpress_directory>"
+    error_exit "Usage: $0 [--bedrock] [--dry-run] [--disable-jq] [--disable-wget] [--update-all] [--subdir <relative_path>] [--allow-check-errors] [--exclude-checks <check1,check2|none>] [--print-results[=md|html]] <path_to_wordpress_directory>"
 fi
 
 # Check if WP_DIR is a directory
@@ -628,49 +684,43 @@ else
   echo "Found plugins: ${PLUGIN_SLUGS[*]}"
   for plugin_slug in "${PLUGIN_SLUGS[@]}"; do
       echo "Checking update status for: $plugin_slug"
-      PLUGIN_UPDATE_CHECK_STDERR_FILE=$(mktemp)
-      update_available=0
+      local update_status_for_file=0 # 0 = no update, 1 = update available
 
-      if [ "$DISABLE_JQ_FLAG" = false ]; then
-          # Use --dry-run with JSON output to check for updates without applying them
-          update_info=$(${WP_CMD} plugin update "$plugin_slug" --dry-run --format=json 2> "$PLUGIN_UPDATE_CHECK_STDERR_FILE" || echo "[]") 
-          PLUGIN_UPDATE_CHECK_ERROR_MSG=$(<"$PLUGIN_UPDATE_CHECK_STDERR_FILE")
-          if [[ -n "$PLUGIN_UPDATE_CHECK_ERROR_MSG" && "$update_info" == "[]" ]]; then
-              warning_msg "Could not check update status for '$plugin_slug' (JSON). WP-CLI stderr:\n${PLUGIN_UPDATE_CHECK_ERROR_MSG}"
-          fi
-          # Check if the JSON array returned by --dry-run is empty or not
-          if echo "$update_info" | jq 'length > 0' &>/dev/null; then
-              update_available=1
-          fi
-      else
-          # Use `wp plugin list --name=<slug> --field=update --format=csv` if jq is disabled
-          # Output: header "update", then value "available", "none", or "unavailable"
-          plugin_update_status_output=$(${WP_CMD} plugin list --name="$plugin_slug" --field=update --format=csv 2> "$PLUGIN_UPDATE_CHECK_STDERR_FILE")
-          PLUGIN_UPDATE_CHECK_ERROR_MSG=$(<"$PLUGIN_UPDATE_CHECK_STDERR_FILE")
-
-          if [[ -n "$PLUGIN_UPDATE_CHECK_ERROR_MSG" && -z "$plugin_update_status_output" ]]; then
-               warning_msg "Could not check update status for '$plugin_slug' (CSV). WP-CLI stderr:\n${PLUGIN_UPDATE_CHECK_ERROR_MSG}"
-          else
-              # Get the actual status value (second line of CSV output)
-              current_plugin_update_status=$(echo "$plugin_update_status_output" | awk 'NR==2 {print $1}')
-              if [[ "$current_plugin_update_status" == "available" ]]; then
-                  update_available=1
-              elif [[ -n "$PLUGIN_UPDATE_CHECK_ERROR_MSG" ]]; then # Log error if CSV output was present but also an error
-                  warning_msg "Error while checking update status for '$plugin_slug' (CSV), though some output was received. WP-CLI stderr:\n${PLUGIN_UPDATE_CHECK_ERROR_MSG}"
-              fi
-          fi
-      fi
-      rm -f "$PLUGIN_UPDATE_CHECK_STDERR_FILE" 
-
-      if [ "$update_available" -eq 1 ]; then
+      if check_single_plugin_update_status "$plugin_slug"; then
+          # Function returned 0 (shell true) => update is available
+          update_status_for_file=1
           echo "  Update available for $plugin_slug."
       else
-          echo "  No update needed for $plugin_slug."
+          # Function returned 1 (shell false) => no update or error
+          update_status_for_file=0
+          if [[ -n "$_PLUGIN_CHECK_ERROR_MSG" ]]; then
+              warning_msg "Could not reliably check update status for '$plugin_slug'. Assuming no update. Details: $_PLUGIN_CHECK_ERROR_MSG"
+          else
+              echo "  No update needed for $plugin_slug."
+          fi
       fi
-      echo "${plugin_slug}|${update_available}" >> "$UPDATE_STATUS_FILE"
+      # The UPDATE_STATUS_FILE stores 1 if update is available, 0 if not.
+      echo "${plugin_slug}|${update_status_for_file}" >> "$UPDATE_STATUS_FILE"
   done
 fi
 echo "Plugin update check complete. Status saved to $UPDATE_STATUS_FILE"
+
+# Populate PLUGINS_TO_UPDATE with all plugins identified as needing an update
+echo "Identifying plugins that require updates from $UPDATE_STATUS_FILE..."
+# Ensure PLUGINS_TO_UPDATE is empty before populating
+PLUGINS_TO_UPDATE=()
+while IFS='|' read -r plugin_slug update_flag || [[ -n "$plugin_slug" ]]; do
+    if [ -z "$plugin_slug" ]; then continue; fi
+    if [ "$update_flag" -eq 1 ]; then
+        PLUGINS_TO_UPDATE+=("$plugin_slug")
+    fi
+done < "$UPDATE_STATUS_FILE"
+
+if [ ${#PLUGINS_TO_UPDATE[@]} -eq 0 ]; then
+    echo "No plugins currently require updates based on initial check."
+else
+    echo "Plugins initially identified for update attempt: ${PLUGINS_TO_UPDATE[*]}"
+fi
 
 # 3. Create Backup (Conditional)
 # Backup paths remain relative to the project root ($WP_DIR)
@@ -766,160 +816,98 @@ for check_name in "${DOCTOR_CHECK_NAMES[@]}"; do
     # Add higher memory limit attempt
     # Use --format=json and WP_CMD
     if ! CHECK_RESULT_JSON=$(WP_CLI_PHP_ARGS="-d memory_limit=512M" ${WP_CMD} doctor check "$check_name" --format=json 2> "$CHECK_STDERR_FILE"); then
-        CHECK_ERROR_MSG=$(<"$CHECK_STDERR_FILE")
-        # If the command itself failed, record this as a critical error
-        ERROR_DETAIL="WP Doctor command failed for check '$check_name'. WP-CLI stderr:\n${CHECK_ERROR_MSG}"
-        echo "FAILED!"
-        echo "$ERROR_DETAIL" >> "$HEALTH_CHECK_FILE" # Log failure
-        DOCTOR_ERRORS_FOUND+=("$ERROR_DETAIL") # Add to array for final report
-        # Store failure status for reporting
+        # Command itself failed (e.g., check doesn't exist, WP-CLI error)
+        local check_stderr_content
+        check_stderr_content=$(<"$CHECK_STDERR_FILE")
+        echo "Failed (command error)"
         DOCTOR_CHECK_STATUSES+=("failed_to_run")
-        DOCTOR_CHECK_MESSAGES+=("$ERROR_DETAIL")
-        rm -f "$CHECK_STDERR_FILE"
-        continue # Continue to next check even if one fails to run
-    fi
-    rm -f "$CHECK_STDERR_FILE" # Clean up temp stderr file on success
-
-    # Log the raw JSON result
-    echo "$CHECK_RESULT_JSON" >> "$HEALTH_CHECK_FILE"
-
-    # Check the status within the JSON result using jq
-    # Filter the array for the object with the matching name, then get status/message
-    # Use --arg to safely pass the shell variable to jq
-    check_status=$(echo "$CHECK_RESULT_JSON" | jq --arg check_name "$check_name" -r '.[] | select(.name == $check_name) | .status // "unknown"')
-    check_message=$(echo "$CHECK_RESULT_JSON" | jq --arg check_name "$check_name" -r '.[] | select(.name == $check_name) | .message // "No message found for this check."')
-
-    # Handle cases where the check name might not be found in the output
-    check_status=${check_status:-unknown}
-    check_message=${check_message:-"Check result not found in JSON output."}
-
-    # Store results for reporting
-    DOCTOR_CHECK_STATUSES+=("$check_status")
-    DOCTOR_CHECK_MESSAGES+=("$check_message")
-
-    if [[ "$check_status" == "error" ]]; then
-        echo "Error!"
-        ERROR_DETAIL="- $check_name ($check_status): $check_message"
-        DOCTOR_ERRORS_FOUND+=("$ERROR_DETAIL")
-    elif [[ "$check_status" == "warning" ]]; then
-        echo "Warning." # Treat warnings as informational for now
-    elif [[ "$check_status" == "success" ]]; then
-         echo "Passed."
+        DOCTOR_CHECK_MESSAGES+=("Command execution failed for $check_name. Stderr: $check_stderr_content")
+        # Log to health check file
+        echo "Check: $check_name, Status: failed_to_run, Message: Command execution failed. Stderr: $check_stderr_content" >> "$HEALTH_CHECK_FILE"
+        if [[ "$ALLOW_CHECK_ERRORS" = false ]]; then
+            DOCTOR_ERRORS_FOUND+=("Doctor check '$check_name' command failed: $check_stderr_content")
+        fi
     else
-        # Handle cases where status is unexpected or missing
-        echo "Status Unknown/Unexpected ('$check_status')."
-        ERROR_DETAIL="- $check_name ($check_status): $check_message"
-        DOCTOR_ERRORS_FOUND+=("$ERROR_DETAIL") # Treat unknown as potential issue
+        # Command executed, CHECK_RESULT_JSON should have output. Now parse it.
+        local check_status
+        local check_message
+
+        # Attempt to parse status and message using jq
+        # Handle cases where CHECK_RESULT_JSON might not be valid JSON or fields are missing
+        if echo "$CHECK_RESULT_JSON" | jq -e .status > /dev/null 2>&1; then
+            check_status=$(echo "$CHECK_RESULT_JSON" | jq -r '.status')
+            check_message=$(echo "$CHECK_RESULT_JSON" | jq -r '.message')
+        else
+            # JSON is invalid or status field is missing
+            local check_stderr_content # Check stderr from the command execution
+            check_stderr_content=$(<"$CHECK_STDERR_FILE")
+            check_status="unknown" # Mark as unknown if parsing fails
+            check_message="Could not parse JSON result or 'status' field missing. Raw output: '$CHECK_RESULT_JSON'. Stderr: '$check_stderr_content'"
+        fi
+
+        echo "$check_status" # Print status to console
+        DOCTOR_CHECK_STATUSES+=("$check_status")
+        DOCTOR_CHECK_MESSAGES+=("$check_message")
+
+        # Log to health check file
+        echo "Check: $check_name, Status: $check_status, Message: $check_message" >> "$HEALTH_CHECK_FILE"
+
+        # Handle errors based on status if not excluded
+        # Only consider "error" status as a failure for DOCTOR_ERRORS_FOUND
+        if [[ "$check_status" == "error" ]]; then
+            local error_entry="Doctor check '$check_name' reported status '$check_status': $check_message"
+            warning_msg "$error_entry" # Also echo to console as a warning
+            if [[ "$ALLOW_CHECK_ERRORS" = false ]]; then
+                DOCTOR_ERRORS_FOUND+=("$error_entry")
+            fi
+        elif [[ "$check_status" == "warning" ]]; then
+            # Log warnings but don't add to DOCTOR_ERRORS_FOUND unless you want to treat warnings as critical
+            warning_msg "Doctor check '$check_name' reported status '$check_status': $check_message"
+        fi
     fi
+    rm -f "$CHECK_STDERR_FILE"
 done
 
-echo "WP Doctor individual checks complete. Results logged to $HEALTH_CHECK_FILE"
-
-# Check if any errors were found (and not excluded)
-if [ ${#DOCTOR_ERRORS_FOUND[@]} -gt 0 ]; then
-    # Join errors with newline characters
-    FORMATTED_ERRORS=$(printf "%s\n" "${DOCTOR_ERRORS_FOUND[@]}")
-    # In dry run, only warn about doctor errors, don't exit (unless --allow-check-errors is also false)
-    if [ "$DRY_RUN_FLAG" = true ] || [ "$ALLOW_CHECK_ERRORS" = true ]; then
-        # If flag is set, print a warning but continue
-        warning_msg $"WP Doctor found errors/issues (after exclusions), but proceeding due to --allow-check-errors or --dry-run flag:\n${FORMATTED_ERRORS}"
-    else
-        # Default behavior: print errors and exit
-        error_exit $"WP Doctor found critical errors/issues (after exclusions). Aborting updates:\n${FORMATTED_ERRORS}"
-    fi
+# After the loop, check DOCTOR_ERRORS_FOUND
+if [ "$ALLOW_CHECK_ERRORS" = false ] && [ ${#DOCTOR_ERRORS_FOUND[@]} -gt 0 ]; then
+    echo "ERROR: Critical WP Doctor errors found:" >&2
+    for err_msg in "${DOCTOR_ERRORS_FOUND[@]}"; do
+        echo "- $err_msg" >&2
+    done
+    error_exit "Aborting due to WP Doctor errors. Use --allow-check-errors to override."
 else
-    echo "WP Doctor checks passed (no critical errors found after exclusions)."
+    if [ ${#DOCTOR_ERRORS_FOUND[@]} -gt 0 ]; then
+        # This means errors were found, but --allow-check-errors was true
+        warning_msg "WP Doctor errors were found but ignored due to --allow-check-errors:"
+        for err_msg in "${DOCTOR_ERRORS_FOUND[@]}"; do
+            warning_msg "- $err_msg"
+        done
+    else
+        echo "WP Doctor checks passed (no critical errors found after exclusions)."
+    fi
 fi
-
-# Re-enable exit on error if it was disabled and you want it back on
-# set -e
 
 # 5. Perform Updates (Conditional)
 if [ "$DRY_RUN_FLAG" = false ]; then
-    echo "Starting plugin updates based on $UPDATE_STATUS_FILE..."
-    # Clear temporary success log
-    > "$UPDATES_NEEDED_LOG" # Use this log for actual updates
-
-    # Read the status file line by line (file is in WP_DIR)
-    while IFS='|' read -r plugin_slug update_flag || [[ -n "$plugin_slug" ]]; do
-        # Ensure plugin_slug is not empty before proceeding
-        if [ -z "$plugin_slug" ]; then
-            continue
+    echo "Performing plugin updates..."
+    for plugin_slug in "${PLUGINS_TO_UPDATE[@]}"; do
+        echo "Updating plugin: $plugin_slug"
+        if ${WP_CMD} plugin update "$plugin_slug"; then
+            echo "Successfully updated: $plugin_slug"
+            SUCCESSFUL_PLUGINS+=("$plugin_slug")
+        else
+            echo "Failed to update: $plugin_slug"
+            FAILED_PLUGINS+=("$plugin_slug")
         fi
-
-        if [ "$update_flag" -eq 1 ]; then
-            PLUGINS_TO_UPDATE+=("$plugin_slug") # Track plugins needing updates for report
-            echo "Attempting to update plugin: $plugin_slug"
-            # Run update from project root (WP_DIR)
-            # Capture stderr for update command
-            UPDATE_STDERR_FILE=$(mktemp)
-            # Use WP_CMD
-            if ${WP_CMD} plugin update "$plugin_slug" --quiet 2> "$UPDATE_STDERR_FILE"; then
-                echo "Successfully updated $plugin_slug."
-                # Log successful update
-                echo "$plugin_slug" >> "$UPDATES_NEEDED_LOG"
-                # Add to success array for reporting
-                SUCCESSFUL_PLUGINS+=("$plugin_slug")
-                rm -f "$UPDATE_STDERR_FILE" # Clean up success stderr
-            else
-                UPDATE_ERROR_MSG=$(<"$UPDATE_STDERR_FILE")
-                rm -f "$UPDATE_STDERR_FILE" # Clean up fail stderr
-                # Log failure for reporting
-                FAILED_PLUGINS+=("$plugin_slug")
-                # Store the error message, removing potential trailing newlines
-                FAILED_MESSAGES+=("$(echo -n "$UPDATE_ERROR_MSG")")
-                warning_msg "Failed to update $plugin_slug. WP-CLI stderr:\n${UPDATE_ERROR_MSG}"
-                # Optionally: Add logic here to handle failed updates (e.g., notify admin)
-            fi
-        fi
-    done < "$UPDATE_STATUS_FILE"
-    echo "Plugin update process finished."
-
-    # Update the status file: Remove successfully updated plugins
-    echo "Cleaning up $UPDATE_STATUS_FILE..."
-    TEMP_UPDATE_FILE=$(mktemp)
-    # Ensure the last line is processed even if it doesn't end with a newline
-    {
-        while IFS='|' read -r plugin_slug update_flag; do
-            # Keep the line if the flag is 0 OR if the flag is 1 BUT the plugin is NOT in the success log
-            if [ "$update_flag" -eq 0 ] || { [ "$update_flag" -eq 1 ] && ! grep -Fxq "$plugin_slug" "$UPDATES_NEEDED_LOG"; }; then
-                echo "${plugin_slug}|${update_flag}" >> "$TEMP_UPDATE_FILE"
-            fi
-        done
-    } < "$UPDATE_STATUS_FILE"
-
-    # Replace the old status file with the updated one
-    mv "$TEMP_UPDATE_FILE" "$UPDATE_STATUS_FILE"
-    echo "$UPDATE_STATUS_FILE updated. Lines for successfully updated plugins removed."
-    rm -f "$UPDATES_NEEDED_LOG" # Remove temporary log
-
+    done
 else
     echo "Skipping plugin updates (Dry Run)."
-    # Populate PLUGINS_TO_UPDATE list for dry run report
-     while IFS='|' read -r plugin_slug update_flag || [[ -n "$plugin_slug" ]]; do
-        if [ -z "$plugin_slug" ];then continue; fi
-        if [ "$update_flag" -eq 1 ]; then
-            PLUGINS_TO_UPDATE+=("$plugin_slug")
-            echo "  Plugin needing update (Dry Run): $plugin_slug"
-        fi
-    done < "$UPDATE_STATUS_FILE"
-    echo "Skipping cleanup of $UPDATE_STATUS_FILE (Dry Run)."
-
 fi
 
-
-# 6. Generate Results File (if requested)
+# Generate results file if requested
 if [[ -n "$PRINT_RESULTS_FORMAT" ]]; then
-   generate_results_file "$PRINT_RESULTS_FORMAT"
+    generate_results_file "$PRINT_RESULTS_FORMAT"
 fi
 
-
-# --- Cleanup ---
-# Keep HEALTH_CHECK_FILE for review
-# rm -f "$HEALTH_CHECK_FILE" # Keep this file now as it contains individual results
-# UPDATES_NEEDED_LOG is already removed in the non-dry-run path
-echo "Temporary files cleaned up."
-
-echo "WordPress maintenance process completed successfully."
-exit 0
+echo "WordPress maintenance process completed."
 
