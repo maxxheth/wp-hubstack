@@ -24,6 +24,12 @@ DRY_RUN_MODE=false # Initialize dry-run flag
 SUBDIR_PATH=""     # Initialize subdir path flag (relative path *within* CONTAINER_WP_PATH)
 EXCLUDE_CHECKS_ARG_BATCH="" # Added for --exclude-checks
 EXCLUDE_CONTAINERS_ARG="" # Added for --exclude-containers
+# Flags to pass through to the underlying wp-plugin-update.sh script
+BEDROCK_MODE_BATCH=false
+ALLOW_CHECK_ERRORS_BATCH=false
+DISABLE_JQ_BATCH=false
+DISABLE_WGET_BATCH=false
+UPDATE_ALL_BATCH=false
 
 # --- Argument Parsing ---
 while [[ "$#" -gt 0 ]]; do
@@ -54,12 +60,23 @@ while [[ "$#" -gt 0 ]]; do
         --exclude-containers)
             if [[ -z "$2" || "$2" == --* ]]; then echo "ERROR: Missing value for --exclude-containers flag." >&2; exit 1; fi
             EXCLUDE_CONTAINERS_ARG="$2"; shift 2 ;;
+        --bedrock)
+            BEDROCK_MODE_BATCH=true; shift ;;
+        --allow-check-errors)
+            ALLOW_CHECK_ERRORS_BATCH=true; shift ;;
+        --disable-jq)
+            DISABLE_JQ_BATCH=true; shift ;;
+        --disable-wget)
+            DISABLE_WGET_BATCH=true; shift ;;
+        --update-all)
+            UPDATE_ALL_BATCH=true; shift ;;
         *)
             echo "ERROR: Unknown option: $1" >&2
             echo "Usage: $0 [--target-dir <dir>] [--dry-run] [--subdir <path>]" >&2
             echo "          --local-update-script <host_script_path> --container-list-file <list_file_path>" >&2
             echo "          [--script-dest-in-container <container_script_path>] [--container-wp-path <path>]" >&2
             echo "          [--exclude-checks <check1,check2|none>] [--exclude-containers <name1,name2>]" >&2
+            echo "          [--bedrock] [--allow-check-errors] [--disable-jq] [--disable-wget] [--update-all]" >&2
             exit 1
             ;;
     esac
@@ -113,6 +130,12 @@ fi
 if [[ -n "$EXCLUDE_CONTAINERS_ARG" ]]; then
     echo "Exclude Containers List: '$EXCLUDE_CONTAINERS_ARG'"
 fi
+if [ "$BEDROCK_MODE_BATCH" = true ]; then echo "Pass-through: --bedrock enabled"; fi
+if [ "$ALLOW_CHECK_ERRORS_BATCH" = true ]; then echo "Pass-through: --allow-check-errors enabled"; fi
+if [ "$DISABLE_JQ_BATCH" = true ]; then echo "Pass-through: --disable-jq enabled"; fi
+if [ "$DISABLE_WGET_BATCH" = true ]; then echo "Pass-through: --disable-wget enabled"; fi
+if [ "$UPDATE_ALL_BATCH" = true ]; then echo "Pass-through: --update-all enabled"; fi
+
 mapfile -t DOCKER_CONTAINER_NAMES < <(awk 'NR > 1 && $NF ~ /^wp_/ {print $NF}' "$CONTAINER_LIST_FILE")
 
 # Get the absolute path of the target directory on the host
@@ -179,6 +202,21 @@ for DOCKER_CONTAINER_NAME in "${DOCKER_CONTAINER_NAMES[@]}"; do
     fi
     if [[ -n "$EXCLUDE_CHECKS_ARG_BATCH" ]]; then
         SCRIPT_ARGS+=("--exclude-checks" "$EXCLUDE_CHECKS_ARG_BATCH")
+    fi
+    if [ "$BEDROCK_MODE_BATCH" = true ]; then
+        SCRIPT_ARGS+=("--bedrock")
+    fi
+    if [ "$ALLOW_CHECK_ERRORS_BATCH" = true ]; then
+        SCRIPT_ARGS+=("--allow-check-errors")
+    fi
+    if [ "$DISABLE_JQ_BATCH" = true ]; then
+        SCRIPT_ARGS+=("--disable-jq")
+    fi
+    if [ "$DISABLE_WGET_BATCH" = true ]; then
+        SCRIPT_ARGS+=("--disable-wget")
+    fi
+    if [ "$UPDATE_ALL_BATCH" = true ]; then
+        SCRIPT_ARGS+=("--update-all")
     fi
     SCRIPT_ARGS+=("$CONTAINER_WP_PATH") # Add the positional WordPress path last
 
