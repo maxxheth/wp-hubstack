@@ -269,16 +269,12 @@ def render_plugin_table(all_data, filter_statuses_str=None, for_pdf=False, pdf_e
             pdf_elements.append(Paragraph("Plugin List (Text Fallback):", pdf_styles['h3']))
             pdf_elements.append(Paragraph(text_table_str.replace("\n", "<br/>\n"), pdf_styles['Code']))
 
-    else: # Console output using plotext.table or simple print
-        # plotext.table might not be ideal for very wide tables, simple print might be better
-        # For simplicity, using basic print:
-        print("\n--- Plugin List ---")
+    else: # Console output
+        # Caller should print a title if desired.
         # Determine max column widths for alignment (optional, can be slow for many rows)
         # For now, simple tab-separated like output
         for row in table_data:
             print("\t".join(map(str,row)))
-        print("--- End of Plugin List ---\n")
-
 
 def main():
     args = parse_args()
@@ -322,24 +318,43 @@ def main():
     # --- Feature Execution ---
     action_taken = False
 
-    if args.list_plugins:
+    # Render global plugin table only if --list-plugins is true AND --render-individual-reports is false
+    if args.list_plugins and not args.render_individual_reports:
         action_taken = True
+        title = "Overall Plugin Listing"
         if args.print_pdf:
-            pdf_elements.append(Paragraph("Plugin Listing", pdf_styles['h2']))
+            pdf_elements.append(Paragraph(title, pdf_styles['h2']))
+        else:
+            print(f"\n--- {title} ---")
         render_plugin_table(all_data, args.filter_plugins_by_status, args.print_pdf, pdf_elements, pdf_styles)
+        if not args.print_pdf:
+            print(f"--- End of {title} ---\n")
 
     if args.render_individual_reports:
         action_taken = True
-        if not args.list_plugins and args.print_pdf : # Add a general title if not already listing plugins
-             pdf_elements.append(Paragraph("Individual Container Plugin Statistics", pdf_styles['h2']))
-        
+        # Add a general title for individual reports section in PDF, if not listing plugins (which has its own overall title)
+        # This H2 is for the "Individual Container Plugin Statistics" section as a whole.
+        # If args.list_plugins is also true, each container's table will get an H3 later.
+        if args.print_pdf and not (args.list_plugins and not args.render_individual_reports): # Avoid double titling if global list was already printed
+            # This condition ensures the "Individual..." H2 is printed if we are doing individual reports,
+            # unless a global plugin list was the *only* thing printed before this section.
+            # A simpler approach might be to always print it if args.render_individual_reports and args.print_pdf
+            if not any(isinstance(el, Paragraph) and el.style.name == 'h2' for el in pdf_elements if hasattr(el, 'style')): # Check if an H2 already exists
+                 # Or more simply, if the "Overall Plugin Listing" H2 was not just added.
+                 # The original condition: `if not args.list_plugins and args.print_pdf:`
+                 # Let's refine this: if we are doing individual reports, we want a section title for it.
+                 pass # The per-container H2 "Statistics for {container_name}" will serve as section titles.
+
         for container_name, c_data in sorted(all_data.items()):
-            if not c_data: # Skip if no plugin data for this container
+            if not c_data: 
                 msg = f"No plugin data for container: {container_name}"
                 if args.print_pdf:
                     pdf_elements.append(Paragraph(msg, pdf_styles['Normal']))
+                    pdf_elements.append(Spacer(1, 0.2 * inch)) # Add spacer after no data message
                 else:
                     print(f"\n--- {msg} ---")
+                if args.print_pdf: # Still add page break if it's an empty container in a list of individuals
+                    pdf_elements.append(PageBreak())
                 continue
 
             title_prefix = f"{container_name} - "
@@ -350,6 +365,19 @@ def main():
             
             container_stats = generate_plugin_stats(c_data)
             render_stats_charts(container_stats, args.chart_type, title_prefix, args.print_pdf, pdf_elements, pdf_styles)
+
+            if args.list_plugins: # Render table for this specific container
+                table_title = f"Plugin List for {container_name}"
+                if args.print_pdf:
+                    pdf_elements.append(Paragraph(table_title, pdf_styles['h3'])) # Use H3 for sub-section
+                else:
+                    print(f"\n--- {table_title} ---")
+                
+                render_plugin_table({container_name: c_data}, args.filter_plugins_by_status, args.print_pdf, pdf_elements, pdf_styles)
+                
+                if not args.print_pdf:
+                    print(f"--- End of {table_title} ---\n")
+            
             if args.print_pdf:
                 pdf_elements.append(PageBreak())
     
