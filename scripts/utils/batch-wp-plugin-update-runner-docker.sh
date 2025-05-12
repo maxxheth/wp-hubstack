@@ -31,6 +31,8 @@ DISABLE_JQ_BATCH=false
 DISABLE_WGET_BATCH=false
 UPDATE_ALL_BATCH=false
 SEO_RANK_ELEMENTOR_UPDATE_BATCH_FLAG=false   # <-- new
+SKIP_PLUGINS_CLI_BATCH_FLAG=false # <-- new
+SKIP_WP_DOCTOR_BATCH_FLAG=false   # <-- new
 
 # --- Argument Parsing ---
 while [[ "$#" -gt 0 ]]; do
@@ -73,6 +75,10 @@ while [[ "$#" -gt 0 ]]; do
             UPDATE_ALL_BATCH=true; shift ;;
         --seo-rank-elementor-update)           # <-- new
             SEO_RANK_ELEMENTOR_UPDATE_BATCH_FLAG=true; shift ;;
+        --skip-plugins)                        # <-- new
+            SKIP_PLUGINS_CLI_BATCH_FLAG=true; shift ;;
+        --skip-wp-doctor)                      # <-- new
+            SKIP_WP_DOCTOR_BATCH_FLAG=true; shift ;;
         *)
             echo "ERROR: Unknown option: $1" >&2
             echo "Usage: $0 [--target-dir <dir>] [--dry-run] [--subdir <path>]" >&2
@@ -80,7 +86,7 @@ while [[ "$#" -gt 0 ]]; do
             echo "          [--script-dest-in-container <container_script_path>] [--container-wp-path <path>]" >&2
             echo "          [--exclude-checks <check1,check2|none>] [--exclude-containers <name1,name2>]" >&2
             echo "          [--bedrock] [--allow-check-errors] [--disable-jq] [--disable-wget] [--update-all]" >&2
-            echo "          [--seo-rank-elementor-update]" >&2 # <-- new
+            echo "          [--seo-rank-elementor-update] [--skip-plugins] [--skip-wp-doctor]" >&2 # <-- new
             exit 1
             ;;
     esac
@@ -140,6 +146,8 @@ if [ "$DISABLE_JQ_BATCH" = true ]; then echo "Pass-through: --disable-jq enabled
 if [ "$DISABLE_WGET_BATCH" = true ]; then echo "Pass-through: --disable-wget enabled"; fi
 if [ "$UPDATE_ALL_BATCH" = true ]; then echo "Pass-through: --update-all enabled"; fi
 if [ "$SEO_RANK_ELEMENTOR_UPDATE_BATCH_FLAG" = true ]; then echo "Pass-through: --seo-rank-elementor-update enabled"; fi  # <-- new
+if [ "$SKIP_PLUGINS_CLI_BATCH_FLAG" = true ]; then echo "Pass-through: --skip-plugins enabled"; fi # <-- new
+if [ "$SKIP_WP_DOCTOR_BATCH_FLAG" = true ]; then echo "Pass-through: --skip-wp-doctor enabled"; fi # <-- new
 
 mapfile -t DOCKER_CONTAINER_NAMES < <(awk 'NR > 1 && $NF ~ /^wp_/ {print $NF}' "$CONTAINER_LIST_FILE")
 
@@ -225,6 +233,12 @@ for DOCKER_CONTAINER_NAME in "${DOCKER_CONTAINER_NAMES[@]}"; do
     fi
     if [ "$SEO_RANK_ELEMENTOR_UPDATE_BATCH_FLAG" = true ]; then       # <-- new
         SCRIPT_ARGS+=("--seo-rank-elementor-update")
+    fi
+    if [ "$SKIP_PLUGINS_CLI_BATCH_FLAG" = true ]; then                # <-- new
+        SCRIPT_ARGS+=("--skip-plugins")
+    fi
+    if [ "$SKIP_WP_DOCTOR_BATCH_FLAG" = true ]; then                  # <-- new
+        SCRIPT_ARGS+=("--skip-wp-doctor")
     fi
     SCRIPT_ARGS+=("$CONTAINER_WP_PATH") # Add the positional WordPress path last
 

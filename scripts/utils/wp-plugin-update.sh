@@ -15,6 +15,8 @@ DISABLE_JQ_FLAG=false # Default: Use jq if available or try to install it
 DISABLE_WGET_FLAG=false # Default: Use wget if needed (e.g. for jq install)
 UPDATE_ALL_FLAG=false # Default: Update plugins individually
 SEO_RANK_ELEMENTOR_UPDATE_FLAG=false # Default: Standard update order
+SKIP_PLUGINS_CLI_FLAG=false # Default: Do not add --skip-plugins to WP-CLI commands
+SKIP_WP_DOCTOR_FLAG=false # Default: Run WP Doctor checks
 # Default checks to exclude from WP Doctor error check
 # Can be overridden by --exclude-checks flag. Use "none" to exclude nothing.
 EXCLUDE_CHECKS_ARG="core-update"
@@ -175,6 +177,8 @@ while [[ "$#" -gt 0 ]]; do
         --disable-wget) DISABLE_WGET_FLAG=true; shift ;; # Disable wget usage and installation
         --update-all) UPDATE_ALL_FLAG=true; shift ;; # Enable updating all plugins at once
         --seo-rank-elementor-update) SEO_RANK_ELEMENTOR_UPDATE_FLAG=true; shift ;; # Enable SEO Rank Math & Elementor priority update
+        --skip-plugins) SKIP_PLUGINS_CLI_FLAG=true; shift ;; # Add --skip-plugins to all wp-cli commands
+        --skip-wp-doctor) SKIP_WP_DOCTOR_FLAG=true; shift ;; # Skip WP Doctor checks entirely
         --subdir) # Handle subdir path
              if [[ -z "$2" || "$2" == --* ]]; then
                  error_exit "Missing value for --subdir flag."
@@ -221,7 +225,7 @@ done
 # --- Pre-flight Checks ---
 # Check if WP_DIR argument was captured
 if [ -z "$WP_DIR" ]; then
-    error_exit "Usage: $0 [--bedrock] [--dry-run] [--disable-jq] [--disable-wget] [--update-all] [--seo-rank-elementor-update] [--subdir <relative_path>] [--allow-check-errors] [--exclude-checks <check1,check2|none>] [--print-results[=md|html]] <path_to_wordpress_directory>"
+    error_exit "Usage: $0 [--bedrock] [--dry-run] [--disable-jq] [--disable-wget] [--update-all] [--seo-rank-elementor-update] [--skip-plugins] [--skip-wp-doctor] [--subdir <relative_path>] [--allow-check-errors] [--exclude-checks <check1,check2|none>] [--print-results[=md|html]] <path_to_wordpress_directory>"
 fi
 
 # Check if WP_DIR is a directory
@@ -629,6 +633,11 @@ echo "Changed directory to $(pwd)" # Should be the WP_DIR provided
 # Construct the base WP-CLI command with path and --allow-root
 # Always add --allow-root
 WP_CMD="wp --allow-root"
+if [ "$SKIP_PLUGINS_CLI_FLAG" = true ]; then
+    WP_CMD="$WP_CMD --skip-plugins"
+    echo "INFO: All WP-CLI commands will use --skip-plugins."
+fi
+
 if [[ -n "$SUBDIR_PATH" ]]; then
     WP_INSTALL_PATH="$WP_DIR/$SUBDIR_PATH"
     # Basic validation for the subdir path relative to current dir (project root)
@@ -642,6 +651,9 @@ if [[ -n "$SUBDIR_PATH" ]]; then
     WP_INSTALL_PATH_ABS=$(realpath "$SUBDIR_PATH")
     # Prepend --path before other flags
     WP_CMD="wp --path=$WP_INSTALL_PATH_ABS --allow-root"
+    if [ "$SKIP_PLUGINS_CLI_FLAG" = true ]; then
+        WP_CMD="$WP_CMD --skip-plugins"
+    fi
     echo "WP-CLI commands will use path: $WP_INSTALL_PATH_ABS"
 fi
 echo "WP-CLI Base Command: $WP_CMD"
@@ -658,7 +670,7 @@ update_plugin_group() {
         local needs_update_from_initial_scan=false
         for p_to_update_master in "${PLUGINS_TO_UPDATE[@]}"; do
             if [[ "$p_to_update_master" == "$plugin_slug" ]]; then
-                needs_update_from_initial_scan=true
+                needs_update_from_initial_scan=true;
                 break
             fi
         done
@@ -718,243 +730,251 @@ update_plugin_group() {
 }
 
 # Check and install WP Doctor if necessary
-echo "Checking if WP Doctor (wp-cli/doctor-command) is installed..."
-# Use WP_CMD which includes --path and --allow-root
-if ! ${WP_CMD} package list --fields=name --format=csv | grep -q "wp-cli/doctor-command"; then
-    echo "WP Doctor not found. Attempting to install..."
-    if [ "$DRY_RUN_FLAG" = true ]; then
-        echo " [DRY RUN] Would run: ${WP_CMD} package install wp-cli/doctor-command:@stable"
-    else
-        # Use WP_CMD
-        if ${WP_CMD} package install wp-cli/doctor-command:@stable; then
-            echo "WP Doctor (wp-cli/doctor-command) installed successfully."
+if [ "$SKIP_WP_DOCTOR_FLAG" = true ]; then
+    echo "Skipping WP Doctor checks as per --skip-wp-doctor flag."
+    # Optionally, populate DOCTOR_CHECK arrays with a skipped message for reporting
+    DOCTOR_CHECK_NAMES_RUN+=("WP Doctor")
+    DOCTOR_CHECK_STATUSES+=("skipped")
+    DOCTOR_CHECK_MESSAGES+=("All WP Doctor checks skipped via --skip-wp-doctor flag.")
+else
+    echo "Checking if WP Doctor (wp-cli/doctor-command) is installed..."
+    # Use WP_CMD which includes --path and --allow-root
+    if ! ${WP_CMD} package list --fields=name --format=csv | grep -q "wp-cli/doctor-command"; then
+        echo "WP Doctor not found. Attempting to install..."
+        if [ "$DRY_RUN_FLAG" = true ]; then
+            echo " [DRY RUN] Would run: ${WP_CMD} package install wp-cli/doctor-command:@stable"
         else
-            error_exit "Failed to install WP Doctor (wp-cli/doctor-command). Please install it manually."
-        fi
-    fi
-else
-    echo "WP Doctor is already installed."
-fi
-
-# 1. Identify Plugins and Check for Updates
-echo "Checking for plugin updates..."
-# Clear previous update status file (relative to WP_DIR)
-> "$UPDATE_STATUS_FILE"
-
-# Get plugin slugs directly from WP-CLI for accuracy
-# Use WP_CMD which includes --path and --allow-root if needed
-PLUGIN_LIST_STDERR_FILE=$(mktemp)
-if ! mapfile -t PLUGIN_SLUGS < <(${WP_CMD} plugin list --field=name --status=active,inactive 2> "$PLUGIN_LIST_STDERR_FILE"); then
-    PLUGIN_LIST_ERROR_MSG=$(<"$PLUGIN_LIST_STDERR_FILE")
-    rm -f "$PLUGIN_LIST_STDERR_FILE"
-    error_exit $"Failed to list plugins using WP-CLI. Ensure WP-CLI is configured correctly for this site. WP-CLI stderr:\n${PLUGIN_LIST_ERROR_MSG}"
-fi
-rm -f "$PLUGIN_LIST_STDERR_FILE" # Clean up if successful
-
-if [ ${#PLUGIN_SLUGS[@]} -eq 0 ]; then
-  echo "No plugins found or WP-CLI failed to list them."
-else
-  echo "Found plugins: ${PLUGIN_SLUGS[*]}"
-  for plugin_slug in "${PLUGIN_SLUGS[@]}"; do
-      echo "Checking update status for: $plugin_slug"
-      update_status_for_file=0 # 0 = no update, 1 = update available
-
-      if check_single_plugin_update_status "$plugin_slug"; then
-          # Function returned 0 (shell true) => update is available
-          update_status_for_file=1
-          echo "  Update available for $plugin_slug."
-      else
-          # Function returned 1 (shell false) => no update or error
-          update_status_for_file=0
-          if [[ -n "$_PLUGIN_CHECK_ERROR_MSG" ]]; then
-              warning_msg "Could not reliably check update status for '$plugin_slug'. Assuming no update. Details: $_PLUGIN_CHECK_ERROR_MSG"
-          else
-              echo "  No update needed for $plugin_slug."
-          fi
-      fi
-      # The UPDATE_STATUS_FILE stores 1 if update is available, 0 if not.
-      echo "${plugin_slug}|${update_status_for_file}" >> "$UPDATE_STATUS_FILE"
-  done
-fi
-echo "Plugin update check complete. Status saved to $UPDATE_STATUS_FILE"
-
-# Populate PLUGINS_TO_UPDATE with all plugins identified as needing an update
-echo "Identifying plugins that require updates from $UPDATE_STATUS_FILE..."
-# Ensure PLUGINS_TO_UPDATE is empty before populating
-PLUGINS_TO_UPDATE=()
-while IFS='|' read -r plugin_slug update_flag || [[ -n "$plugin_slug" ]]; do
-    if [ -z "$plugin_slug" ]; then continue; fi
-    if [ "$update_flag" -eq 1 ]; then
-        PLUGINS_TO_UPDATE+=("$plugin_slug")
-    fi
-done < "$UPDATE_STATUS_FILE"
-
-if [ ${#PLUGINS_TO_UPDATE[@]} -eq 0 ]; then
-    echo "No plugins currently require updates based on initial check."
-else
-    echo "Plugins initially identified for update attempt: ${PLUGINS_TO_UPDATE[*]}"
-fi
-
-# 3. Create Backup (Conditional)
-# Backup paths remain relative to the project root ($WP_DIR)
-if [ "$DRY_RUN_FLAG" = false ]; then
-    BACKUP_DIR_NAME="plugins_bu_$(date +%Y%m%d_%H%M%S)"
-    # Construct the full path for the backup directory relative to WP_DIR
-    BACKUP_PATH="$BACKUP_PARENT_DIR/$BACKUP_DIR_NAME"
-    # Construct the full path for the source plugins directory relative to WP_DIR
-    SOURCE_PLUGINS_PATH="$PLUGINS_DIR"
-
-    echo "Creating backup of plugins directory ($SOURCE_PLUGINS_PATH)..."
-    # Ensure source path exists before copying
-    if [ ! -d "$SOURCE_PLUGINS_PATH" ]; then
-        error_exit "Plugins directory to backup not found at '$SOURCE_PLUGINS_PATH'. Check --bedrock flag if needed."
-    fi
-    cp -r "$SOURCE_PLUGINS_PATH" "$BACKUP_PATH" || error_exit "Failed to create backup directory at $BACKUP_PATH from $SOURCE_PLUGINS_PATH"
-    echo "Backup created successfully at $BACKUP_PATH"
-else
-    echo "Skipping backup creation (Dry Run)."
-fi
-
-# 4. Perform Health Checks
-echo "Performing site health checks..."
-
-# 4a. HTTP Status Check
-# Use WP_CMD
-SITE_URL=$(${WP_CMD} option get home 2>/dev/null) || error_exit "Failed to get site URL using 'wp option get home'."
-if [ -z "$SITE_URL" ]; then
-    error_exit "Site URL is empty. Cannot perform HTTP check."
-fi
-echo "Checking HTTP status for $SITE_URL..."
-# Use curl with -L to follow redirects, common in WP setups
-HTTP_STATUS=$(curl -L -o /dev/null -s -w "%{http_code}" --max-time 15 --retry 3 --retry-delay 2 "$SITE_URL")
-
-if [ "$HTTP_STATUS" -ne 200 ]; then
-    # In dry run, only warn about HTTP failure, don't exit
-    if [ "$DRY_RUN_FLAG" = true ]; then
-        warning_msg "HTTP status check failed! Expected 200, got $HTTP_STATUS for $SITE_URL (Dry Run - Not exiting)."
-    else
-        error_exit "HTTP status check failed! Expected 200, but got $HTTP_STATUS for $SITE_URL after following redirects. Aborting updates."
-    fi
-else
-    echo "HTTP status check passed (Code: $HTTP_STATUS)."
-fi
-
-# 4b. WP Doctor Check (Individual Checks)
-echo "Running WP Doctor checks individually..."
-# Clear previous results log
-> "$HEALTH_CHECK_FILE"
-DOCTOR_ERRORS_FOUND=() # Array to store error messages
-
-# Prepare the list of excluded checks (using awk for robustness with comma/spaces)
-EXCLUDED_CHECKS_ARRAY=()
-if [[ "$EXCLUDE_CHECKS_ARG" != "none" ]]; then
-    IFS=',' read -r -a EXCLUDED_CHECKS_ARRAY <<< "$(echo "$EXCLUDE_CHECKS_ARG" | sed 's/ *, */,/g')" # Normalize commas and read into array
-    echo "WP Doctor: Excluding checks from error report: ${EXCLUDED_CHECKS_ARRAY[*]}"
-else
-     echo "WP Doctor: Checking status for all checks (no exclusions)."
-fi
-
-# Function to check if an element is in an array
-containsElement () {
-  local e match="$1"
-  shift
-  for e; do [[ "$e" == "$match" ]] && return 0; done
-  return 1
-}
-
-# Get list of available checks using JSON format
-# Use WP_CMD
-DOCTOR_CHECKS_JSON=$(${WP_CMD} doctor list --format=json 2>/dev/null) || error_exit "Failed to get list of WP Doctor checks."
-mapfile -t DOCTOR_CHECK_NAMES < <(echo "$DOCTOR_CHECKS_JSON" | jq -r '.[].name')
-
-# Loop through each check
-for check_name in "${DOCTOR_CHECK_NAMES[@]}"; do
-    # Store check name regardless of whether it's excluded, for potential reporting
-    DOCTOR_CHECK_NAMES_RUN+=("$check_name")
-
-    # Check if this check is excluded (using bash array check)
-    if containsElement "$check_name" "${EXCLUDED_CHECKS_ARRAY[@]}"; then
-        echo "  Running check: $check_name... Skipped (excluded)."
-        # Add placeholder status/message for skipped checks
-        DOCTOR_CHECK_STATUSES+=("skipped")
-        DOCTOR_CHECK_MESSAGES+=("Excluded by --exclude-checks flag.")
-        continue
-    fi
-
-    echo -n "  Running check: $check_name... "
-
-    # Run the individual check with JSON format, capture stdout and stderr
-    CHECK_STDERR_FILE=$(mktemp)
-    CHECK_RESULT_JSON=""
-    # Add higher memory limit attempt
-    # Use --format=json and WP_CMD
-    if ! CHECK_RESULT_JSON=$(WP_CLI_PHP_ARGS="-d memory_limit=512M" ${WP_CMD} doctor check "$check_name" --format=json 2> "$CHECK_STDERR_FILE"); then
-        # Command itself failed (e.g., check doesn't exist, WP-CLI error)
-        check_stderr_content=$(<"$CHECK_STDERR_FILE")
-        echo "Failed (command error)"
-        DOCTOR_CHECK_STATUSES+=("failed_to_run")
-        DOCTOR_CHECK_MESSAGES+=("Command execution failed for $check_name. Stderr: $check_stderr_content")
-        # Log to health check file
-        echo "Check: $check_name, Status: failed_to_run, Message: Command execution failed. Stderr: $check_stderr_content" >> "$HEALTH_CHECK_FILE"
-        if [[ "$ALLOW_CHECK_ERRORS" = false ]]; then
-            DOCTOR_ERRORS_FOUND+=("Doctor check '$check_name' command failed: $check_stderr_content")
-        fi
-    else
-        # Command executed, CHECK_RESULT_JSON should have output. Now parse it.
-        check_status=""
-        check_message=""
-
-        # Attempt to parse status and message using jq
-        # Handle cases where CHECK_RESULT_JSON might not be valid JSON or fields are missing
-        if echo "$CHECK_RESULT_JSON" | jq -e .status > /dev/null 2>&1; then
-            check_status=$(echo "$CHECK_RESULT_JSON" | jq -r '.status')
-            check_message=$(echo "$CHECK_RESULT_JSON" | jq -r '.message')
-        else
-            # JSON is invalid or status field is missing
-            check_stderr_content=$(<"$CHECK_STDERR_FILE") # Check stderr from the command execution
-            check_status="unknown" # Mark as unknown if parsing fails
-            check_message="Could not parse JSON result or 'status' field missing. Raw output: '$CHECK_RESULT_JSON'. Stderr: '$check_stderr_content'"
-        fi
-
-        echo "$check_status" # Print status to console
-        DOCTOR_CHECK_STATUSES+=("$check_status")
-        DOCTOR_CHECK_MESSAGES+=("$check_message")
-
-        # Log to health check file
-        echo "Check: $check_name, Status: $check_status, Message: $check_message" >> "$HEALTH_CHECK_FILE"
-
-        # Handle errors based on status if not excluded
-        # Only consider "error" status as a failure for DOCTOR_ERRORS_FOUND
-        if [[ "$check_status" == "error" ]]; then
-            error_entry="Doctor check '$check_name' reported status '$check_status': $check_message"
-            warning_msg "$error_entry" # Also echo to console as a warning
-            if [[ "$ALLOW_CHECK_ERRORS" = false ]]; then
-                DOCTOR_ERRORS_FOUND+=("$error_entry")
+            # Use WP_CMD
+            if ${WP_CMD} package install wp-cli/doctor-command:@stable; then
+                echo "WP Doctor (wp-cli/doctor-command) installed successfully."
+            else
+                error_exit "Failed to install WP Doctor (wp-cli/doctor-command). Please install it manually."
             fi
-        elif [[ "$check_status" == "warning" ]]; then
-            # Log warnings but don't add to DOCTOR_ERRORS_FOUND unless you want to treat warnings as critical
-            warning_msg "Doctor check '$check_name' reported status '$check_status': $check_message"
         fi
-    fi
-    rm -f "$CHECK_STDERR_FILE"
-done
-
-# After the loop, check DOCTOR_ERRORS_FOUND
-if [ "$ALLOW_CHECK_ERRORS" = false ] && [ ${#DOCTOR_ERRORS_FOUND[@]} -gt 0 ]; then
-    echo "ERROR: Critical WP Doctor errors found:" >&2
-    for err_msg in "${DOCTOR_ERRORS_FOUND[@]}"; do
-        echo "- $err_msg" >&2
-    done
-    error_exit "Aborting due to WP Doctor errors. Use --allow-check-errors to override."
-else
-    if [ ${#DOCTOR_ERRORS_FOUND[@]} -gt 0 ]; then
-        # This means errors were found, but --allow-check-errors was true
-        warning_msg "WP Doctor errors were found but ignored due to --allow-check-errors:"
-        for err_msg in "${DOCTOR_ERRORS_FOUND[@]}"; do
-            warning_msg "- $err_msg"
-        done
     else
-        echo "WP Doctor checks passed (no critical errors found after exclusions)."
+        echo "WP Doctor is already installed."
+    fi
+
+    # 1. Identify Plugins and Check for Updates
+    echo "Checking for plugin updates..."
+    # Clear previous update status file (relative to WP_DIR)
+    > "$UPDATE_STATUS_FILE"
+
+    # Get plugin slugs directly from WP-CLI for accuracy
+    # Use WP_CMD which includes --path and --allow-root if needed
+    PLUGIN_LIST_STDERR_FILE=$(mktemp)
+    if ! mapfile -t PLUGIN_SLUGS < <(${WP_CMD} plugin list --field=name --status=active,inactive 2> "$PLUGIN_LIST_STDERR_FILE"); then
+        PLUGIN_LIST_ERROR_MSG=$(<"$PLUGIN_LIST_STDERR_FILE")
+        rm -f "$PLUGIN_LIST_STDERR_FILE"
+        error_exit $"Failed to list plugins using WP-CLI. Ensure WP-CLI is configured correctly for this site. WP-CLI stderr:\n${PLUGIN_LIST_ERROR_MSG}"
+    fi
+    rm -f "$PLUGIN_LIST_STDERR_FILE" # Clean up if successful
+
+    if [ ${#PLUGIN_SLUGS[@]} -eq 0 ]; then
+      echo "No plugins found or WP-CLI failed to list them."
+    else
+      echo "Found plugins: ${PLUGIN_SLUGS[*]}"
+      for plugin_slug in "${PLUGIN_SLUGS[@]}"; do
+          echo "Checking update status for: $plugin_slug"
+          update_status_for_file=0 # 0 = no update, 1 = update available
+
+          if check_single_plugin_update_status "$plugin_slug"; then
+              # Function returned 0 (shell true) => update is available
+              update_status_for_file=1
+              echo "  Update available for $plugin_slug."
+          else
+              # Function returned 1 (shell false) => no update or error
+              update_status_for_file=0
+              if [[ -n "$_PLUGIN_CHECK_ERROR_MSG" ]]; then
+                  warning_msg "Could not reliably check update status for '$plugin_slug'. Assuming no update. Details: $_PLUGIN_CHECK_ERROR_MSG"
+              else
+                  echo "  No update needed for $plugin_slug."
+              fi
+          fi
+          # The UPDATE_STATUS_FILE stores 1 if update is available, 0 if not.
+          echo "${plugin_slug}|${update_status_for_file}" >> "$UPDATE_STATUS_FILE"
+      done
+    fi
+    echo "Plugin update check complete. Status saved to $UPDATE_STATUS_FILE"
+
+    # Populate PLUGINS_TO_UPDATE with all plugins identified as needing an update
+    echo "Identifying plugins that require updates from $UPDATE_STATUS_FILE..."
+    # Ensure PLUGINS_TO_UPDATE is empty before populating
+    PLUGINS_TO_UPDATE=()
+    while IFS='|' read -r plugin_slug update_flag || [[ -n "$plugin_slug" ]]; do
+        if [ -z "$plugin_slug" ]; then continue; fi
+        if [ "$update_flag" -eq 1 ]; then
+            PLUGINS_TO_UPDATE+=("$plugin_slug")
+        fi
+    done < "$UPDATE_STATUS_FILE"
+
+    if [ ${#PLUGINS_TO_UPDATE[@]} -eq 0 ]; then
+        echo "No plugins currently require updates based on initial check."
+    else
+        echo "Plugins initially identified for update attempt: ${PLUGINS_TO_UPDATE[*]}"
+    fi
+
+    # 3. Create Backup (Conditional)
+    # Backup paths remain relative to the project root ($WP_DIR)
+    if [ "$DRY_RUN_FLAG" = false ]; then
+        BACKUP_DIR_NAME="plugins_bu_$(date +%Y%m%d_%H%M%S)"
+        # Construct the full path for the backup directory relative to WP_DIR
+        BACKUP_PATH="$BACKUP_PARENT_DIR/$BACKUP_DIR_NAME"
+        # Construct the full path for the source plugins directory relative to WP_DIR
+        SOURCE_PLUGINS_PATH="$PLUGINS_DIR"
+
+        echo "Creating backup of plugins directory ($SOURCE_PLUGINS_PATH)..."
+        # Ensure source path exists before copying
+        if [ ! -d "$SOURCE_PLUGINS_PATH" ]; then
+            error_exit "Plugins directory to backup not found at '$SOURCE_PLUGINS_PATH'. Check --bedrock flag if needed."
+        fi
+        cp -r "$SOURCE_PLUGINS_PATH" "$BACKUP_PATH" || error_exit "Failed to create backup directory at $BACKUP_PATH from $SOURCE_PLUGINS_PATH"
+        echo "Backup created successfully at $BACKUP_PATH"
+    else
+        echo "Skipping backup creation (Dry Run)."
+    fi
+
+    # 4. Perform Health Checks
+    echo "Performing site health checks..."
+
+    # 4a. HTTP Status Check
+    # Use WP_CMD
+    SITE_URL=$(${WP_CMD} option get home 2>/dev/null) || error_exit "Failed to get site URL using 'wp option get home'."
+    if [ -z "$SITE_URL" ]; then
+        error_exit "Site URL is empty. Cannot perform HTTP check."
+    fi
+    echo "Checking HTTP status for $SITE_URL..."
+    # Use curl with -L to follow redirects, common in WP setups
+    HTTP_STATUS=$(curl -L -o /dev/null -s -w "%{http_code}" --max-time 15 --retry 3 --retry-delay 2 "$SITE_URL")
+
+    if [ "$HTTP_STATUS" -ne 200 ]; then
+        # In dry run, only warn about HTTP failure, don't exit
+        if [ "$DRY_RUN_FLAG" = true ]; then
+            warning_msg "HTTP status check failed! Expected 200, got $HTTP_STATUS for $SITE_URL (Dry Run - Not exiting)."
+        else
+            error_exit "HTTP status check failed! Expected 200, but got $HTTP_STATUS for $SITE_URL after following redirects. Aborting updates."
+        fi
+    else
+        echo "HTTP status check passed (Code: $HTTP_STATUS)."
+    fi
+
+    # 4b. WP Doctor Check (Individual Checks)
+    echo "Running WP Doctor checks individually..."
+    # Clear previous results log
+    > "$HEALTH_CHECK_FILE"
+    DOCTOR_ERRORS_FOUND=() # Array to store error messages
+
+    # Prepare the list of excluded checks (using awk for robustness with comma/spaces)
+    EXCLUDED_CHECKS_ARRAY=()
+    if [[ "$EXCLUDE_CHECKS_ARG" != "none" ]]; then
+        IFS=',' read -r -a EXCLUDED_CHECKS_ARRAY <<< "$(echo "$EXCLUDE_CHECKS_ARG" | sed 's/ *, */,/g')" # Normalize commas and read into array
+        echo "WP Doctor: Excluding checks from error report: ${EXCLUDED_CHECKS_ARRAY[*]}"
+    else
+         echo "WP Doctor: Checking status for all checks (no exclusions)."
+    fi
+
+    # Function to check if an element is in an array
+    containsElement () {
+      local e match="$1"
+      shift
+      for e; do [[ "$e" == "$match" ]] && return 0; done
+      return 1
+    }
+
+    # Get list of available checks using JSON format
+    # Use WP_CMD
+    DOCTOR_CHECKS_JSON=$(${WP_CMD} doctor list --format=json 2>/dev/null) || error_exit "Failed to get list of WP Doctor checks."
+    mapfile -t DOCTOR_CHECK_NAMES < <(echo "$DOCTOR_CHECKS_JSON" | jq -r '.[].name')
+
+    # Loop through each check
+    for check_name in "${DOCTOR_CHECK_NAMES[@]}"; do
+        # Store check name regardless of whether it's excluded, for potential reporting
+        DOCTOR_CHECK_NAMES_RUN+=("$check_name")
+
+        # Check if this check is excluded (using bash array check)
+        if containsElement "$check_name" "${EXCLUDED_CHECKS_ARRAY[@]}"; then
+            echo "  Running check: $check_name... Skipped (excluded)."
+            # Add placeholder status/message for skipped checks
+            DOCTOR_CHECK_STATUSES+=("skipped")
+            DOCTOR_CHECK_MESSAGES+=("Excluded by --exclude-checks flag.")
+            continue
+        fi
+
+        echo -n "  Running check: $check_name... "
+
+        # Run the individual check with JSON format, capture stdout and stderr
+        CHECK_STDERR_FILE=$(mktemp)
+        CHECK_RESULT_JSON=""
+        # Add higher memory limit attempt
+        # Use --format=json and WP_CMD
+        if ! CHECK_RESULT_JSON=$(WP_CLI_PHP_ARGS="-d memory_limit=512M" ${WP_CMD} doctor check "$check_name" --format=json 2> "$CHECK_STDERR_FILE"); then
+            # Command itself failed (e.g., check doesn't exist, WP-CLI error)
+            check_stderr_content=$(<"$CHECK_STDERR_FILE")
+            echo "Failed (command error)"
+            DOCTOR_CHECK_STATUSES+=("failed_to_run")
+            DOCTOR_CHECK_MESSAGES+=("Command execution failed for $check_name. Stderr: $check_stderr_content")
+            # Log to health check file
+            echo "Check: $check_name, Status: failed_to_run, Message: Command execution failed. Stderr: $check_stderr_content" >> "$HEALTH_CHECK_FILE"
+            if [[ "$ALLOW_CHECK_ERRORS" = false ]]; then
+                DOCTOR_ERRORS_FOUND+=("Doctor check '$check_name' command failed: $check_stderr_content")
+            fi
+        else
+            # Command executed, CHECK_RESULT_JSON should have output. Now parse it.
+            check_status=""
+            check_message=""
+
+            # Attempt to parse status and message using jq
+            # Handle cases where CHECK_RESULT_JSON might not be valid JSON or fields are missing
+            if echo "$CHECK_RESULT_JSON" | jq -e .status > /dev/null 2>&1; then
+                check_status=$(echo "$CHECK_RESULT_JSON" | jq -r '.status')
+                check_message=$(echo "$CHECK_RESULT_JSON" | jq -r '.message')
+            else
+                # JSON is invalid or status field is missing
+                check_stderr_content=$(<"$CHECK_STDERR_FILE") # Check stderr from the command execution
+                check_status="unknown" # Mark as unknown if parsing fails
+                check_message="Could not parse JSON result or 'status' field missing. Raw output: '$CHECK_RESULT_JSON'. Stderr: '$check_stderr_content'"
+            fi
+
+            echo "$check_status" # Print status to console
+            DOCTOR_CHECK_STATUSES+=("$check_status")
+            DOCTOR_CHECK_MESSAGES+=("$check_message")
+
+            # Log to health check file
+            echo "Check: $check_name, Status: $check_status, Message: $check_message" >> "$HEALTH_CHECK_FILE"
+
+            # Handle errors based on status if not excluded
+            # Only consider "error" status as a failure for DOCTOR_ERRORS_FOUND
+            if [[ "$check_status" == "error" ]]; then
+                error_entry="Doctor check '$check_name' reported status '$check_status': $check_message"
+                warning_msg "$error_entry" # Also echo to console as a warning
+                if [[ "$ALLOW_CHECK_ERRORS" = false ]]; then
+                    DOCTOR_ERRORS_FOUND+=("$error_entry")
+                fi
+            elif [[ "$check_status" == "warning" ]]; then
+                # Log warnings but don't add to DOCTOR_ERRORS_FOUND unless you want to treat warnings as critical
+                warning_msg "Doctor check '$check_name' reported status '$check_status': $check_message"
+            fi
+        fi
+        rm -f "$CHECK_STDERR_FILE"
+    done
+
+    # After the loop, check DOCTOR_ERRORS_FOUND
+    if [ "$ALLOW_CHECK_ERRORS" = false ] && [ ${#DOCTOR_ERRORS_FOUND[@]} -gt 0 ]; then
+        echo "ERROR: Critical WP Doctor errors found:" >&2
+        for err_msg in "${DOCTOR_ERRORS_FOUND[@]}"; do
+            echo "- $err_msg" >&2
+        done
+        error_exit "Aborting due to WP Doctor errors. Use --allow-check-errors to override."
+    else
+        if [ ${#DOCTOR_ERRORS_FOUND[@]} -gt 0 ]; then
+            # This means errors were found, but --allow-check-errors was true
+            warning_msg "WP Doctor errors were found but ignored due to --allow-check-errors:"
+            for err_msg in "${DOCTOR_ERRORS_FOUND[@]}"; do
+                warning_msg "- $err_msg"
+            done
+        else
+            echo "WP Doctor checks passed (no critical errors found after exclusions)."
+        fi
     fi
 fi
 
