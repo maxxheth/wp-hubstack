@@ -14,6 +14,7 @@ DRY_RUN_FLAG=false # Default: Perform actual updates and backups
 DISABLE_JQ_FLAG=false # Default: Use jq if available or try to install it
 DISABLE_WGET_FLAG=false # Default: Use wget if needed (e.g. for jq install)
 UPDATE_ALL_FLAG=false # Default: Update plugins individually
+SEO_RANK_ELEMENTOR_UPDATE_FLAG=false # Default: Standard update order
 # Default checks to exclude from WP Doctor error check
 # Can be overridden by --exclude-checks flag. Use "none" to exclude nothing.
 EXCLUDE_CHECKS_ARG="core-update"
@@ -173,6 +174,7 @@ while [[ "$#" -gt 0 ]]; do
         --disable-jq) DISABLE_JQ_FLAG=true; shift ;; # Disable jq usage and installation
         --disable-wget) DISABLE_WGET_FLAG=true; shift ;; # Disable wget usage and installation
         --update-all) UPDATE_ALL_FLAG=true; shift ;; # Enable updating all plugins at once
+        --seo-rank-elementor-update) SEO_RANK_ELEMENTOR_UPDATE_FLAG=true; shift ;; # Enable SEO Rank Math & Elementor priority update
         --subdir) # Handle subdir path
              if [[ -z "$2" || "$2" == --* ]]; then
                  error_exit "Missing value for --subdir flag."
@@ -219,7 +221,7 @@ done
 # --- Pre-flight Checks ---
 # Check if WP_DIR argument was captured
 if [ -z "$WP_DIR" ]; then
-    error_exit "Usage: $0 [--bedrock] [--dry-run] [--disable-jq] [--disable-wget] [--update-all] [--subdir <relative_path>] [--allow-check-errors] [--exclude-checks <check1,check2|none>] [--print-results[=md|html]] <path_to_wordpress_directory>"
+    error_exit "Usage: $0 [--bedrock] [--dry-run] [--disable-jq] [--disable-wget] [--update-all] [--seo-rank-elementor-update] [--subdir <relative_path>] [--allow-check-errors] [--exclude-checks <check1,check2|none>] [--print-results[=md|html]] <path_to_wordpress_directory>"
 fi
 
 # Check if WP_DIR is a directory
@@ -644,6 +646,77 @@ if [[ -n "$SUBDIR_PATH" ]]; then
 fi
 echo "WP-CLI Base Command: $WP_CMD"
 
+# Helper function to update a specific group of plugins
+update_plugin_group() {
+    local group_name="$1"
+    shift
+    local specific_plugins_to_update=("$@") # This is an array of plugin slugs for the current group
+
+    echo "Updating $group_name plugins..."
+    for plugin_slug in "${specific_plugins_to_update[@]}"; do
+        # Check if this plugin was identified in the initial scan as needing an update
+        local needs_update_from_initial_scan=false
+        for p_to_update_master in "${PLUGINS_TO_UPDATE[@]}"; do
+            if [[ "$p_to_update_master" == "$plugin_slug" ]]; then
+                needs_update_from_initial_scan=true
+                break
+            fi
+        done
+
+        if ! $needs_update_from_initial_scan; then
+            # If it wasn't in the initial list, check if it was somehow already updated (edge case)
+            local already_succeeded_edge_case=false
+            for suc_p_edge in "${SUCCESSFUL_PLUGINS[@]}"; do if [[ "$suc_p_edge" == "$plugin_slug" ]]; then already_succeeded_edge_case=true; break; fi; done
+
+            if $already_succeeded_edge_case; then
+                 echo "  Plugin $plugin_slug was already updated in a previous step (though not in initial scan list). Skipping."
+            else
+                 # Check if the plugin is even installed if not found in initial scan list
+                 if ! ${WP_CMD} plugin is-installed "$plugin_slug" >/dev/null 2>&1; then
+                    echo "  Plugin $plugin_slug is not installed. Skipping."
+                 else
+                    echo "  Plugin $plugin_slug does not require an update (as per initial scan) or is not installed. Skipping."
+                 fi
+            fi
+            continue
+        fi
+
+        # Check if already successfully updated in this run (e.g. if called multiple times with overlap)
+        local already_attempted_successfully=false
+        for suc_p in "${SUCCESSFUL_PLUGINS[@]}"; do if [[ "$suc_p" == "$plugin_slug" ]]; then already_attempted_successfully=true; break; fi; done
+        if $already_attempted_successfully; then
+            echo "  Plugin $plugin_slug already successfully updated in this run. Skipping."
+            continue
+        fi
+
+        # Check if already attempted and failed in this run
+        local already_attempted_failed=false
+        for fail_p in "${FAILED_PLUGINS[@]}"; do if [[ "$fail_p" == "$plugin_slug" ]]; then already_attempted_failed=true; break; fi; done
+        if $already_attempted_failed; then
+            echo "  Plugin $plugin_slug already attempted and failed in this run. Skipping."
+            continue
+        fi
+
+        echo "  Updating plugin: $plugin_slug"
+        local update_stderr_file
+        update_stderr_file=$(mktemp)
+        # Pass the single plugin slug directly to the update command
+        if ${WP_CMD} plugin update "$plugin_slug" 2> "$update_stderr_file"; then
+            echo "  Successfully updated: $plugin_slug"
+            SUCCESSFUL_PLUGINS+=("$plugin_slug")
+        else
+            local update_error_msg
+            update_error_msg=$(<"$update_stderr_file")
+            local update_error_msg_oneline # Renamed for clarity within this scope
+            update_error_msg_oneline=$(echo "$update_error_msg" | tr -d '\n\r' | sed 's/^Error: //')
+            echo "  Failed to update: $plugin_slug. Error: $update_error_msg"
+            FAILED_PLUGINS+=("$plugin_slug")
+            FAILED_MESSAGES+=("$update_error_msg_oneline")
+        fi
+        rm -f "$update_stderr_file"
+    done
+}
+
 # Check and install WP Doctor if necessary
 echo "Checking if WP Doctor (wp-cli/doctor-command) is installed..."
 # Use WP_CMD which includes --path and --allow-root
@@ -888,18 +961,153 @@ fi
 # 5. Perform Updates (Conditional)
 if [ "$DRY_RUN_FLAG" = false ]; then
     echo "Performing plugin updates..."
-    for plugin_slug in "${PLUGINS_TO_UPDATE[@]}"; do
-        echo "Updating plugin: $plugin_slug"
-        if ${WP_CMD} plugin update "$plugin_slug"; then
-            echo "Successfully updated: $plugin_slug"
-            SUCCESSFUL_PLUGINS+=("$plugin_slug")
+    # Ensure these are reset before starting updates for this run
+    SUCCESSFUL_PLUGINS=()
+    FAILED_PLUGINS=()
+    FAILED_MESSAGES=()
+
+    if [ "$SEO_RANK_ELEMENTOR_UPDATE_FLAG" = true ]; then
+        echo "SEO Rank Math & Elementor priority update mode enabled."
+
+        # These are regular shell arrays, not local, as this is not a function
+        RANK_MATH_PLUGINS_ORDER=("seo-by-rank-math")
+        ELEMENTOR_PLUGINS_ORDER=("elementor-pro" "elementor")
+
+        update_plugin_group "Rank Math" "${RANK_MATH_PLUGINS_ORDER[@]}"
+        update_plugin_group "Elementor" "${ELEMENTOR_PLUGINS_ORDER[@]}"
+
+        echo "Updating remaining plugins..."
+        # This is a regular shell array
+        REMAINING_PLUGINS_TO_UPDATE=()
+        for plugin_slug_iter_rem in "${PLUGINS_TO_UPDATE[@]}"; do
+            # This variable is scoped to the loop iteration, not declared 'local'
+            is_priority_plugin_rem=false
+            for p_rank_rem in "${RANK_MATH_PLUGINS_ORDER[@]}"; do
+                if [[ "$plugin_slug_iter_rem" == "$p_rank_rem" ]]; then is_priority_plugin_rem=true; break; fi
+            done
+            if ! $is_priority_plugin_rem; then # Only check Elementor if not already found in Rank Math
+                for p_elem_rem in "${ELEMENTOR_PLUGINS_ORDER[@]}"; do
+                    if [[ "$plugin_slug_iter_rem" == "$p_elem_rem" ]]; then is_priority_plugin_rem=true; break; fi
+                done
+            fi
+
+            if ! $is_priority_plugin_rem; then
+                REMAINING_PLUGINS_TO_UPDATE+=("$plugin_slug_iter_rem")
+            fi
+        done
+
+        if [ ${#REMAINING_PLUGINS_TO_UPDATE[@]} -gt 0 ]; then
+            if [ "$UPDATE_ALL_FLAG" = true ]; then
+                echo "Updating all remaining plugins at once: ${REMAINING_PLUGINS_TO_UPDATE[*]}"
+                # Temporary file, not local
+                update_stderr_file_all_rem=$(mktemp)
+                # Pass the array of remaining plugins to the update command
+                if ${WP_CMD} plugin update "${REMAINING_PLUGINS_TO_UPDATE[@]}" 2> "$update_stderr_file_all_rem"; then
+                    echo "Successfully updated remaining plugins group."
+                    for p_slug in "${REMAINING_PLUGINS_TO_UPDATE[@]}"; do
+                        # Variables for checks, not local
+                        already_handled_final_check_s=false
+                        for sp in "${SUCCESSFUL_PLUGINS[@]}"; do if [[ "$sp" == "$p_slug" ]]; then already_handled_final_check_s=true; break; fi; done
+                        for fp in "${FAILED_PLUGINS[@]}"; do if [[ "$fp" == "$p_slug" ]]; then already_handled_final_check_s=true; break; fi; done # Check failed too
+                        if ! $already_handled_final_check_s; then SUCCESSFUL_PLUGINS+=("$p_slug"); fi
+                    done
+                else
+                    # Error message variables, not local
+                    update_error_msg_all_rem=$(<"$update_stderr_file_all_rem")
+                    update_error_msg_all_rem_oneline=$(echo "$update_error_msg_all_rem" | tr -d '\n\r' | sed 's/^Error: //')
+                    echo "Failed to update one or more remaining plugins when using --update-all. Error: $update_error_msg_all_rem"
+                    for p_slug in "${REMAINING_PLUGINS_TO_UPDATE[@]}"; do
+                        # Variables for checks, not local
+                        already_handled_final_check_f=false
+                        for sp in "${SUCCESSFUL_PLUGINS[@]}"; do if [[ "$sp" == "$p_slug" ]]; then already_handled_final_check_f=true; break; fi; done
+                        for fp in "${FAILED_PLUGINS[@]}"; do if [[ "$fp" == "$p_slug" ]]; then already_handled_final_check_f=true; break; fi; done
+                        if ! $already_handled_final_check_f; then
+                            FAILED_PLUGINS+=("$p_slug")
+                            FAILED_MESSAGES+=("Part of failed --update-all group (remaining): $update_error_msg_all_rem_oneline")
+                        fi
+                    done
+                fi
+                rm -f "$update_stderr_file_all_rem"
+            else
+                # Call update_plugin_group for remaining plugins if not --update-all
+                update_plugin_group "Other" "${REMAINING_PLUGINS_TO_UPDATE[@]}"
+            fi
         else
-            echo "Failed to update: $plugin_slug"
-            FAILED_PLUGINS+=("$plugin_slug")
+            echo "No other plugins left to update."
         fi
-    done
+
+    elif [ "$UPDATE_ALL_FLAG" = true ]; then # SEO_RANK_ELEMENTOR_UPDATE_FLAG is false, but UPDATE_ALL_FLAG is true
+        if [ ${#PLUGINS_TO_UPDATE[@]} -gt 0 ]; then
+            echo "Updating all plugins at once: ${PLUGINS_TO_UPDATE[*]}"
+            # Temporary file, not local
+            update_stderr_file_all_gen=$(mktemp)
+            # Pass the array of all plugins to update to the command
+            if ${WP_CMD} plugin update "${PLUGINS_TO_UPDATE[@]}" 2> "$update_stderr_file_all_gen"; then
+                echo "Successfully updated all plugins."
+                # Mark all plugins from PLUGINS_TO_UPDATE as successful if the batch command succeeded
+                # and they haven't been marked as failed from a prior (e.g. priority) step.
+                for p_slug in "${PLUGINS_TO_UPDATE[@]}"; do
+                    # Variables for checks, not local
+                    already_handled_gen_s=false
+                    for sp in "${SUCCESSFUL_PLUGINS[@]}"; do if [[ "$sp" == "$p_slug" ]]; then already_handled_gen_s=true; break; fi; done
+                    for fp in "${FAILED_PLUGINS[@]}"; do if [[ "$fp" == "$p_slug" ]]; then already_handled_gen_s=true; break; fi; done
+                    if ! $already_handled_gen_s; then SUCCESSFUL_PLUGINS+=("$p_slug"); fi
+                done
+            else
+                # Error message variables, not local
+                update_error_msg_all_gen=$(<"$update_stderr_file_all_gen")
+                update_error_msg_all_gen_oneline=$(echo "$update_error_msg_all_gen" | tr -d '\n\r' | sed 's/^Error: //')
+                echo "Failed to update one or more plugins when using --update-all. Error: $update_error_msg_all_gen"
+                # Mark all plugins from this attempt as failed if the batch failed,
+                # unless they were already successfully updated (e.g. in a priority step).
+                for p_slug in "${PLUGINS_TO_UPDATE[@]}"; do
+                    # Variables for checks, not local
+                    already_handled_gen_f=false
+                    for sp in "${SUCCESSFUL_PLUGINS[@]}"; do if [[ "$sp" == "$p_slug" ]]; then already_handled_gen_f=true; break; fi; done # Check if already successful
+                    for fp in "${FAILED_PLUGINS[@]}"; do if [[ "$fp" == "$p_slug" ]]; then already_handled_gen_f=true; break; fi; done # Check if already failed
+                    if ! $already_handled_gen_f; then
+                       FAILED_PLUGINS+=("$p_slug")
+                       FAILED_MESSAGES+=("Part of failed --update-all group: $update_error_msg_all_gen_oneline")
+                    fi
+                done
+            fi
+            rm -f "$update_stderr_file_all_gen"
+        else
+            echo "No plugins to update with --update-all."
+        fi
+    else # Original individual update logic (neither SEO_RANK_ELEMENTOR_UPDATE_FLAG nor UPDATE_ALL_FLAG)
+        # This loop iterates over PLUGINS_TO_UPDATE.
+        # The update_plugin_group function is now the primary way individual plugins are updated
+        # when SEO_RANK_ELEMENTOR_UPDATE_FLAG is true and UPDATE_ALL_FLAG is false for the "Other" group.
+        # This specific 'else' block will handle the case where neither of those flags are set.
+        for plugin_slug_ind in "${PLUGINS_TO_UPDATE[@]}"; do
+            # Check if already processed by a (hypothetically) preceding step, though unlikely in this specific path.
+            # Variables for checks, not local
+            already_s_ind=false; for s_p in "${SUCCESSFUL_PLUGINS[@]}"; do if [[ "$s_p" == "$plugin_slug_ind" ]]; then already_s_ind=true; break; fi; done
+            already_f_ind=false; for f_p in "${FAILED_PLUGINS[@]}"; do if [[ "$f_p" == "$plugin_slug_ind" ]]; then already_f_ind=true; break; fi; done
+            if $already_s_ind || $already_f_ind; then continue; fi
+
+            echo "Updating plugin (individual mode): $plugin_slug_ind"
+            # Temporary file, not local
+            update_stderr_file_ind=$(mktemp)
+            if ${WP_CMD} plugin update "$plugin_slug_ind" 2> "$update_stderr_file_ind"; then
+                echo "Successfully updated: $plugin_slug_ind"
+                SUCCESSFUL_PLUGINS+=("$plugin_slug_ind")
+            else
+                # Error message variables, not local
+                update_error_msg_ind=$(<"$update_stderr_file_ind")
+                update_error_msg_ind_oneline=$(echo "$update_error_msg_ind" | tr -d '\n\r' | sed 's/^Error: //')
+                echo "Failed to update: $plugin_slug_ind. Error: $update_error_msg_ind"
+                FAILED_PLUGINS+=("$plugin_slug_ind")
+                FAILED_MESSAGES+=("$update_error_msg_ind_oneline")
+            fi
+            rm -f "$update_stderr_file_ind"
+        done
+    fi
 else
     echo "Skipping plugin updates (Dry Run)."
+    # PLUGINS_TO_UPDATE is already populated with plugins that would be updated.
+    # The reporting logic uses this array directly in dry run mode.
 fi
 
 # Generate results file if requested
