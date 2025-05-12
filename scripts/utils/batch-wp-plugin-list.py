@@ -92,7 +92,7 @@ def display_pies(all_data): # This function renders bar charts
     # aggregate across all containers
     stats = {
         "status": {"active":0, "inactive":0, "must-use":0, "active-network":0, "dropin":0},
-        "update": {"none":0, "available":0, "unavailable":0},
+        "update": {"none":0, "available":0, "unavailable":0, "version higher than expected":0},
         "auto_update": {"on":0, "off":0},
     }
 
@@ -156,12 +156,13 @@ def display_pies(all_data): # This function renders bar charts
     if update_items:
         labels, values = zip(*update_items.items())
         color_map_update = {
-            "none": "green",      # Up to date
-            "available": "red",   # Update available
-            "unavailable": "yellow" # Update status unknown
+            "none": "green",
+            "available": "red",
+            "unavailable": "yellow",
+            "version higher than expected": "orange"
         }
         bar_colors = [color_map_update.get(label, "blue") for label in labels]
-        plt.simple_bar(labels, values, title="Plugin Update Status", color=bar_colors)
+        plt.simple_bar(labels, values, title="Plugin Update Availability", color=bar_colors)
         plt.show()
     else:
         print("No data to display for Plugin Update Status.")
