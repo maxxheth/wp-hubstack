@@ -91,7 +91,7 @@ def load_plugin_data(raw, fmt):
 def display_pies(all_data): # This function renders bar charts
     # aggregate across all containers
     stats = {
-        "status": {"active":0, "inactive":0, "must-use":0, "active-network":0},
+        "status": {"active":0, "inactive":0, "must-use":0, "active-network":0, "dropin":0},
         "update": {"none":0, "available":0, "unavailable":0},
         "auto_update": {"on":0, "off":0},
     }
@@ -141,7 +141,8 @@ def display_pies(all_data): # This function renders bar charts
             "active": "green",
             "inactive": "red",
             "must-use": "light_green",
-            "active-network": "cyan"
+            "active-network": "cyan",
+            "dropin": "magenta"
         }
         bar_colors = [color_map_status.get(label, "blue") for label in labels]
         plt.simple_bar(labels, values, title="Plugin Status Distribution", color=bar_colors)

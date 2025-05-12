@@ -86,7 +86,7 @@ def display_summary_and_charts(all_data):
 
     # 3) Overall status/update/auto_update stats aggregation
     stats = {
-        "status": {"active":0, "inactive":0, "must-use":0, "active-network":0},
+        "status": {"active":0, "inactive":0, "must-use":0, "active-network":0, "dropin":0},
         "update": {"none":0, "available":0, "unavailable":0},
         "auto_update": {"on":0, "off":0},
     }
@@ -119,7 +119,7 @@ def display_summary_and_charts(all_data):
         {
             "key": "status",
             "title": "Plugin Status Distribution (Overall)",
-            "color_map": { "active": "green", "inactive": "red", "must-use": "light_green", "active-network": "cyan" }
+            "color_map": { "active": "green", "inactive": "red", "must-use": "light_green", "active-network": "cyan", "dropin": "magenta" }
         },
         {
             "key": "update",
