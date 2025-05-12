@@ -63,6 +63,93 @@ def load_plugins_from_file(path, fmt):
                 plugins.append(row[0])  # assume first column is plugin slug
     return plugins
 
+def display_summary_and_charts(all_data):
+    # 1) Unique plugins across all containers
+    unique = set()
+    for plugins_list in all_data.values(): # Renamed to avoid conflict
+        for p in plugins_list:
+            name = p.get("name")
+            if name:
+                unique.add(name)
+    print(f"Found {len(all_data)} containers")
+    print(f"Total unique plugins across all containers: {len(unique)}\n")
+
+    # 2) Plugins per container
+    containers = list(all_data.keys())
+    counts = [len(all_data[c]) for c in containers]
+    plt.clear_figure()
+    plt.bar(containers, counts, color="blue") # Using a single color for this bar chart
+    plt.title("Plugins Installed per Container")
+    plt.xlabel("Container")
+    plt.ylabel("Plugin Count")
+    plt.show()
+
+    # 3) Overall status/update/auto_update stats aggregation
+    stats = {
+        "status": {"active":0, "inactive":0, "must-use":0, "active-network":0},
+        "update": {"none":0, "available":0, "unavailable":0},
+        "auto_update": {"on":0, "off":0},
+    }
+    for plugins_list in all_data.values(): # Renamed to avoid conflict
+        for p in plugins_list:
+            st = p.get("status","").strip()
+            if st in stats["status"]:
+                stats["status"][st] += 1
+            
+            update_value = p.get("update") # Get raw value
+            upd = "" 
+            if isinstance(update_value, str):
+                upd = update_value.strip()
+            elif isinstance(update_value, bool):
+                upd = "available" if update_value else "none"
+            if upd in stats["update"]:
+                stats["update"][upd] += 1
+            
+            auto_update_value = p.get("auto_update") # Get raw value
+            au = "" 
+            if isinstance(auto_update_value, str):
+                au = auto_update_value.strip()
+            elif isinstance(auto_update_value, bool):
+                au = "on" if auto_update_value else "off"
+            if au in stats["auto_update"]:
+                stats["auto_update"][au] += 1
+
+    # 4) Pie‐charts for each metric
+    chart_configs = [
+        {
+            "key": "status",
+            "title": "Plugin Status Distribution (Overall)",
+            "color_map": { "active": "green", "inactive": "red", "must-use": "light_green", "active-network": "cyan" }
+        },
+        {
+            "key": "update",
+            "title": "Plugin Update Status (Overall)",
+            "color_map": { "none": "green", "available": "red", "unavailable": "yellow" }
+        },
+        {
+            "key": "auto_update",
+            "title": "Auto-update On vs Off (Overall)",
+            "color_map": { "on": "green", "off": "red" }
+        }
+    ]
+
+    for config in chart_configs:
+        plt.clear_figure()
+        key = config["key"]
+        title = config["title"]
+        color_map = config["color_map"]
+
+        filtered_items = {k: v for k, v in stats[key].items() if v > 0}
+        if filtered_items:
+            labels, values = zip(*filtered_items.items())
+            pie_colors = [color_map.get(l, "blue") for l in labels] # Default to blue if label not in map
+            
+            plt.pie(values, labels=labels, colors=pie_colors)
+            plt.title(title)
+            plt.show()
+        else:
+            print(f"No data to display for {title}.")
+
 def main():
     args = parse_args()
     rpt_dir = os.path.abspath(args.reports_dir)
@@ -70,9 +157,7 @@ def main():
         print(f"ERROR: reports directory not found: {rpt_dir}", file=sys.stderr)
         sys.exit(1)
 
-    containers = []
-    counts = []
-    unique = set()
+    all_data = {}
 
     # expect one subdirectory per container
     for name in sorted(os.listdir(rpt_dir)):
@@ -84,30 +169,13 @@ def main():
             print(f"WARNING: missing report for {name}: {fn}", file=sys.stderr)
             continue
         plugins = load_plugins_from_file(fn, args.format)
-        cnt = len(plugins)
-        containers.append(name)
-        counts.append(cnt)
-        unique.update(plugins)
+        all_data[name] = plugins
 
-    if not containers:
+    if not all_data:
         print("No container reports found.", file=sys.stderr)
         sys.exit(0)
 
-    # print summary
-    print(f"Found {len(containers)} containers")
-    print(f"Total unique plugins across all containers: {len(unique)}\n")
-
-    # plot
-    plt.clear_figure()
-    if args.chart_type == "bar":
-        plt.bar(containers, counts, label="Plugins per container")
-        plt.title("Plugins Installed per Container")
-        plt.xlabel("Container")
-        plt.ylabel("Plugin Count")
-    else:
-        plt.pie(counts, labels=containers)
-        plt.title("Plugin Count Distribution")
-    plt.show()
+    display_summary_and_charts(all_data)
 
 if __name__ == "__main__":
     main()

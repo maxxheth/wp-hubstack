@@ -88,17 +88,16 @@ def load_plugin_data(raw, fmt):
     reader = csv.DictReader(lines)
     return list(reader)
 
-def display_pies(all_data): # Renamed to display_charts, or keep as display_pies and note it's now bar charts
+def display_pies(all_data): # This function renders bar charts
     # aggregate across all containers
     stats = {
         "status": {"active":0, "inactive":0, "must-use":0, "active-network":0},
-        "update": {"none":0, "available":0, "unavailable":0}, # Added 'unavailable' based on script logic
+        "update": {"none":0, "available":0, "unavailable":0},
         "auto_update": {"on":0, "off":0},
     }
 
     for plugins in all_data.values():
         for p in plugins:
-            # Ensure p is a dictionary, which it should be if load_plugin_data works correctly
             if not isinstance(p, dict):
                 print(f"WARNING: Expected a dictionary for plugin data, got {type(p)}: {p}", file=sys.stderr)
                 continue
@@ -106,13 +105,11 @@ def display_pies(all_data): # Renamed to display_charts, or keep as display_pies
             st = p.get("status", "").strip()
             if st in stats["status"]:
                 stats["status"][st] += 1
-            elif st: # Log if status is present but not recognized
+            elif st:
                 print(f"INFO: Unrecognized plugin status '{st}' found.", file=sys.stderr)
 
-
-            # Handle 'update' field
-            update_value = p.get("update") 
-            upd = "" 
+            update_value = p.get("update")
+            upd = ""
             if isinstance(update_value, str):
                 upd = update_value.strip()
             elif isinstance(update_value, bool):
@@ -120,13 +117,11 @@ def display_pies(all_data): # Renamed to display_charts, or keep as display_pies
             
             if upd in stats["update"]:
                 stats["update"][upd] += 1
-            elif upd: # Log if update value is present but not recognized
+            elif upd:
                  print(f"INFO: Unrecognized update status '{upd}' found for plugin '{p.get('name', 'N/A')}'.", file=sys.stderr)
 
-
-            # Handle 'auto_update' field
-            auto_update_value = p.get("auto_update") 
-            au = "" 
+            auto_update_value = p.get("auto_update")
+            au = ""
             if isinstance(auto_update_value, str):
                 au = auto_update_value.strip()
             elif isinstance(auto_update_value, bool):
@@ -134,33 +129,38 @@ def display_pies(all_data): # Renamed to display_charts, or keep as display_pies
 
             if au in stats["auto_update"]:
                 stats["auto_update"][au] += 1
-            elif au: # Log if auto_update value is present but not recognized
+            elif au:
                 print(f"INFO: Unrecognized auto_update status '{au}' found for plugin '{p.get('name', 'N/A')}'.", file=sys.stderr)
-
-    # Filter out categories with zero counts to prevent errors or empty bars
-    # if the plotting library doesn't handle them gracefully.
-    # For plotext.simple_bar, it's generally okay, but good practice for robustness.
 
     # 1) Status distribution
     plt.clear_figure()
-    # Filtered items for status
     status_items = {k: v for k, v in stats["status"].items() if v > 0}
     if status_items:
         labels, values = zip(*status_items.items())
-        # Changed from plt.pie to plt.simple_bar
-        plt.simple_bar(labels, values, title="Plugin Status Distribution")
+        color_map_status = {
+            "active": "green",
+            "inactive": "red",
+            "must-use": "light_green",
+            "active-network": "cyan"
+        }
+        bar_colors = [color_map_status.get(label, "blue") for label in labels]
+        plt.simple_bar(labels, values, title="Plugin Status Distribution", color=bar_colors)
         plt.show()
     else:
         print("No data to display for Plugin Status Distribution.")
-
 
     # 2) Update availability
     plt.clear_figure()
     update_items = {k: v for k, v in stats["update"].items() if v > 0}
     if update_items:
         labels, values = zip(*update_items.items())
-        # Changed from plt.pie to plt.simple_bar
-        plt.simple_bar(labels, values, title="Plugin Update Status")
+        color_map_update = {
+            "none": "green",      # Up to date
+            "available": "red",   # Update available
+            "unavailable": "yellow" # Update status unknown
+        }
+        bar_colors = [color_map_update.get(label, "blue") for label in labels]
+        plt.simple_bar(labels, values, title="Plugin Update Status", color=bar_colors)
         plt.show()
     else:
         print("No data to display for Plugin Update Status.")
@@ -170,8 +170,12 @@ def display_pies(all_data): # Renamed to display_charts, or keep as display_pies
     auto_update_items = {k: v for k, v in stats["auto_update"].items() if v > 0}
     if auto_update_items:
         labels, values = zip(*auto_update_items.items())
-        # Changed from plt.pie to plt.simple_bar
-        plt.simple_bar(labels, values, title="Auto-update On vs Off")
+        color_map_auto_update = {
+            "on": "green",
+            "off": "red"
+        }
+        bar_colors = [color_map_auto_update.get(label, "blue") for label in labels]
+        plt.simple_bar(labels, values, title="Auto-update On vs Off", color=bar_colors)
         plt.show()
     else:
         print("No data to display for Auto-update On vs Off.")
