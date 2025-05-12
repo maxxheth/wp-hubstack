@@ -165,7 +165,8 @@ def render_stats_charts(stats_data, chart_type, title_prefix="", for_pdf=False, 
             "color_map": {"active": "green", "inactive": "red", "must-use": "light_green", "active-network": "cyan", "dropin": "magenta"}
         },
         {
-            "key": "update", "title": "Plugin Update Status",
+            "key": "update",
+            "title": "Plugin Update Status (Overall)",
             "color_map": {"none": "green", "available": "red", "unavailable": "yellow", "version higher than expected": "orange"}
         },
         {
@@ -400,17 +401,26 @@ def main():
                 print(no_data_per_container_msg)
 
 
-        # 3. Overall status/update/auto_update charts
-        if flat_plugin_list_for_stats:
-            overall_stats = generate_plugin_stats(flat_plugin_list_for_stats)
-            render_stats_charts(overall_stats, args.chart_type, "Overall - ", args.print_pdf, pdf_elements, pdf_styles)
-        else:
-            no_overall_stats_msg = "No plugin data available for overall statistics charts."
-            if args.print_pdf:
-                pdf_elements.append(Paragraph(no_overall_stats_msg, pdf_styles['Normal']))
-            else:
-                print(no_overall_stats_msg)
+        # 3) Overall status/update/auto_update stats aggregation
+        stats = {
+            "status": {"active": 0, "inactive": 0, "must-use": 0, "active-network": 0, "dropin": 0},
+            "update": {"none": 0, "available": 0, "unavailable": 0, "version higher than expected": 0},
+            "auto_update": {"on": 0, "off": 0},
+        }
+        for plugins_list in all_data.values(): # Renamed to avoid conflict
+            for p in plugins_list:
+                if isinstance(p, dict):
+                    st = p.get("status", "").strip()
+                    if st in stats["status"]:
+                        stats["status"][st] += 1
+                    update_value = p.get("update", "").strip()
+                    if update_value in stats["update"]:
+                        stats["update"][update_value] += 1
+                    auto_update_value = p.get("auto_update", "").strip()
+                    if auto_update_value in stats["auto_update"]:
+                        stats["auto_update"][auto_update_value] += 1
 
+        render_stats_charts(stats, args.chart_type, "Overall - ", args.print_pdf, pdf_elements, pdf_styles)
 
     # --- PDF Generation ---
     if args.print_pdf:
