@@ -1,1 +1,2 @@
 plotext>=5.0.0
+reportlab>=3.6.12
