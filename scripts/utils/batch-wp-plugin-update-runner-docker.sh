@@ -16,7 +16,8 @@ EXCLUDE_CHECKS_ARG_BATCH=""
 EXCLUDE_CONTAINERS_ARG="" 
 SKIP_WP_DOCTOR_BATCH_FLAG=false
 SKIP_PLUGINS_BATCH_FLAG=false
-SKIP_BACKUP_BATCH_FLAG=false # New flag
+SKIP_BACKUP_BATCH_FLAG=false
+DRY_RUN_BATCH_FLAG=false # New flag
 
 # --- Argument Parsing ---
 while [[ "$#" -gt 0 ]]; do
@@ -49,15 +50,17 @@ while [[ "$#" -gt 0 ]]; do
             SKIP_WP_DOCTOR_BATCH_FLAG=true; shift ;;
         --skip-plugins) 
             SKIP_PLUGINS_BATCH_FLAG=true; shift ;;
-        --skip-backup) # New flag
+        --skip-backup) 
             SKIP_BACKUP_BATCH_FLAG=true; shift ;;
+        --dry-run) # New flag
+            DRY_RUN_BATCH_FLAG=true; shift ;;
         *)
             echo "ERROR: Unknown option: $1" >&2
             echo "Usage: $0 [--target-dir <dir>] [--subdir <path>]" >&2
             echo "          --local-update-script <host_script_path> --container-list-file <list_file_path>" >&2
             echo "          [--script-dest-in-container <container_script_path>] [--container-wp-path <path>]" >&2
             echo "          [--exclude-checks <check1,check2|none>] [--exclude-containers <name1,name2>]" >&2
-            echo "          [--skip-wp-doctor] [--skip-plugins] [--skip-backup]" >&2
+            echo "          [--skip-wp-doctor] [--skip-plugins] [--skip-backup] [--dry-run]" >&2
             exit 1
             ;;
     esac
@@ -86,7 +89,8 @@ if [[ -n "$EXCLUDE_CHECKS_ARG_BATCH" ]]; then echo "Pass-through: --exclude-chec
 if [[ -n "$EXCLUDE_CONTAINERS_ARG" ]]; then echo "Exclude Containers List: '$EXCLUDE_CONTAINERS_ARG'"; fi
 if [ "$SKIP_WP_DOCTOR_BATCH_FLAG" = true ]; then echo "Pass-through: --skip-wp-doctor enabled"; fi
 if [ "$SKIP_PLUGINS_BATCH_FLAG" = true ]; then echo "Pass-through: --skip-plugins enabled"; fi
-if [ "$SKIP_BACKUP_BATCH_FLAG" = true ]; then echo "Pass-through: --skip-backup enabled"; fi # New log line
+if [ "$SKIP_BACKUP_BATCH_FLAG" = true ]; then echo "Pass-through: --skip-backup enabled"; fi
+if [ "$DRY_RUN_BATCH_FLAG" = true ]; then echo "Pass-through: --dry-run enabled"; fi # New log line
 
 mapfile -t DOCKER_CONTAINER_NAMES < <(awk 'NR > 1 && $NF ~ /^wp_/ {print $NF}' "$CONTAINER_LIST_FILE")
 
@@ -104,6 +108,8 @@ echo "Found ${#DOCKER_CONTAINER_NAMES[@]} WordPress containers to process:"
 printf "  %s\n" "${DOCKER_CONTAINER_NAMES[@]}"
 echo "---"
 
+overall_success=true
+
 for DOCKER_CONTAINER_NAME in "${DOCKER_CONTAINER_NAMES[@]}"; do
     if [[ -n "$EXCLUDE_CONTAINERS_ARG" ]]; then
         if [[ ",$EXCLUDE_CONTAINERS_ARG," == *",$DOCKER_CONTAINER_NAME,"* ]]; then
@@ -115,12 +121,14 @@ for DOCKER_CONTAINER_NAME in "${DOCKER_CONTAINER_NAMES[@]}"; do
 
     echo "Injecting update script '$LOCAL_UPDATE_SCRIPT_PATH' to '$DOCKER_CONTAINER_NAME:$SCRIPT_DEST_IN_CONTAINER'..."
     if ! docker cp "$LOCAL_UPDATE_SCRIPT_PATH" "$DOCKER_CONTAINER_NAME:$SCRIPT_DEST_IN_CONTAINER"; then
-        echo "ERROR: Failed to copy update script to container '$DOCKER_CONTAINER_NAME'. Skipping." >&2; echo "---"; continue
+        echo "ERROR: Failed to copy update script to container '$DOCKER_CONTAINER_NAME'. Skipping." >&2; echo "---"; overall_success=false; continue
     fi
 
     report_filename_in_container="update-results.$REPORT_FORMAT"
+    # Report is generated in the WP_DIR inside the container, which is $CONTAINER_WP_PATH
+    report_source_path_container="$CONTAINER_WP_PATH/$report_filename_in_container" 
     report_dest_path_host="$REPORT_BATCH_DIR_HOST/${sanitized_container_name}-${report_filename_in_container}"
-    report_source_path_container="$CONTAINER_WP_PATH/$report_filename_in_container" # Assumes report is in WP_DIR
+
 
     SCRIPT_ARGS=()
     SCRIPT_ARGS+=("--print-results" "$REPORT_FORMAT") 
@@ -128,29 +136,27 @@ for DOCKER_CONTAINER_NAME in "${DOCKER_CONTAINER_NAMES[@]}"; do
     if [[ -n "$EXCLUDE_CHECKS_ARG_BATCH" ]]; then SCRIPT_ARGS+=("--exclude-checks" "$EXCLUDE_CHECKS_ARG_BATCH"); fi
     if [ "$SKIP_WP_DOCTOR_BATCH_FLAG" = true ]; then SCRIPT_ARGS+=("--skip-wp-doctor"); fi
     if [ "$SKIP_PLUGINS_BATCH_FLAG" = true ]; then SCRIPT_ARGS+=("--skip-plugins"); fi
-    if [ "$SKIP_BACKUP_BATCH_FLAG" = true ]; then SCRIPT_ARGS+=("--skip-backup"); fi # Pass flag to inner script
-    SCRIPT_ARGS+=("$CONTAINER_WP_PATH")
+    if [ "$SKIP_BACKUP_BATCH_FLAG" = true ]; then SCRIPT_ARGS+=("--skip-backup"); fi 
+    if [ "$DRY_RUN_BATCH_FLAG" = true ]; then SCRIPT_ARGS+=("--dry-run"); fi # Pass flag to inner script
+    SCRIPT_ARGS+=("$CONTAINER_WP_PATH") # This is the WP_DIR for the script inside the container
 
     DOCKER_EXEC_CMD=(docker exec -i "$DOCKER_CONTAINER_NAME" bash "$SCRIPT_DEST_IN_CONTAINER" "${SCRIPT_ARGS[@]}")
 
     echo "Running update script '$SCRIPT_DEST_IN_CONTAINER' inside container '$DOCKER_CONTAINER_NAME'..."
     if "${DOCKER_EXEC_CMD[@]}"; then
         echo "Update script finished successfully inside container for $DOCKER_CONTAINER_NAME."
-        echo "Attempting to copy report '$report_source_path_container' from container to '$report_dest_path_host'..."
-        if docker cp "$DOCKER_CONTAINER_NAME:$report_source_path_container" "$report_dest_path_host"; then
-            echo "Report file copied successfully to $report_dest_path_host."
-        else
-            echo "WARNING: Failed to copy report file from container for $DOCKER_CONTAINER_NAME. Path: '$report_source_path_container'" >&2
-        fi
     else
         script_exit_code=$?
-        echo "WARNING: Update script failed inside container for $DOCKER_CONTAINER_NAME (Exit Code: $script_exit_code)." >&2
-        echo "Attempting to copy potentially incomplete report '$report_source_path_container' from container..."
-        if docker cp "$DOCKER_CONTAINER_NAME:$report_source_path_container" "$report_dest_path_host"; then
-            echo "Potentially incomplete report file copied to $report_dest_path_host."
-        else
-            echo "WARNING: Failed to copy report file from container after script failure for $DOCKER_CONTAINER_NAME." >&2
-        fi
+        echo "WARNING: Update script failed or reported errors inside container for $DOCKER_CONTAINER_NAME (Exit Code: $script_exit_code)." >&2
+        overall_success=false # Mark overall process as failed if any script fails
+    fi
+
+    echo "Attempting to copy report '$report_source_path_container' from container to '$report_dest_path_host'..."
+    if docker cp "$DOCKER_CONTAINER_NAME:$report_source_path_container" "$report_dest_path_host"; then
+        echo "Report file copied successfully to $report_dest_path_host."
+    else
+        echo "WARNING: Failed to copy report file from container for $DOCKER_CONTAINER_NAME. Path: '$report_source_path_container'" >&2
+        # Not necessarily a failure of the overall batch, but good to note.
     fi
 
     echo "Removing injected script '$SCRIPT_DEST_IN_CONTAINER' from container '$DOCKER_CONTAINER_NAME'..."
@@ -162,4 +168,10 @@ done
 
 echo "Batch WordPress update process completed."
 echo "Reports collected in: $REPORT_BATCH_DIR_HOST"
-exit 0
+
+if [ "$overall_success" = true ]; then
+    exit 0
+else
+    echo "One or more container scripts reported errors or failed."
+    exit 1
+fi
