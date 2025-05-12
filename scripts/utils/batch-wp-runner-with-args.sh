@@ -38,5 +38,6 @@ fi
 # Always run the main batch update script, passing any remaining arguments
 echo "Running batch-wp-plugin-update-runner-docker.sh..."
 docker ps > /var/opt/docker-containers.txt
-./batch-wp-plugin-update-runner-docker.sh --local-update-script /var/opt/wp-plugin-update.sh --container-list-file /var/opt/docker-containers.txt --exclude-checks core-update,constant-wp-debug-falsy,cache-flush
+#./batch-wp-plugin-update-runner-docker.sh --local-update-script /var/opt/wp-plugin-update.sh --container-list-file /var/opt/docker-containers.txt --exclude-checks core-update,constant-wp-debug-falsy,cache-flush
+./batch-wp-plugin-update-runner-docker.sh --local-update-script /var/opt/wp-plugin-update.sh --container-list-file /var/opt/docker-containers.txt --exclude-checks core-update,constant-wp-debug-falsy,cache-flush --disable-jq --disable-wget --update-all --seo-rank-elementor-update --skip-plugins --skip-wp-doctor
 #./batch-wp-plugin-update-runner-docker.sh "$@"
