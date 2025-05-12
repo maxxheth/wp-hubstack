@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Exit immediately if a command exits with a non-zero status.
-# set -e # Keep disabled for detailed WP Doctor debugging
+set -e # Keep disabled for detailed WP Doctor debugging
 
 # --- Configuration ---
 # Default values
