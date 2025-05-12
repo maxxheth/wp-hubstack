@@ -226,12 +226,12 @@ def render_plugin_table(all_data, filter_statuses_str=None, for_pdf=False, pdf_e
                 continue
             
             row = [
-                container_name,
-                p.get("name", "N/A"),
-                status,
-                p.get("version", "N/A"),
-                p.get("update", "N/A"),
-                p.get("auto_update", "N/A")
+                str(container_name), # Ensure all data is string for width calculation
+                str(p.get("name", "N/A")),
+                str(status),
+                str(p.get("version", "N/A")),
+                str(p.get("update", "N/A")),
+                str(p.get("auto_update", "N/A"))
             ]
             table_data.append(row)
 
@@ -250,7 +250,24 @@ def render_plugin_table(all_data, filter_statuses_str=None, for_pdf=False, pdf_e
         # Adjust column widths as needed, this is a basic setup
         col_widths = [1.5*inch, 2*inch, 1*inch, 0.8*inch, 1*inch, 1*inch] 
         try:
-            t = Table(table_data, colWidths=col_widths)
+            # For ReportLab, use the original data, not necessarily stringified for console
+            pdf_table_data = [header]
+            for container_name, plugins in sorted(all_data.items()):
+                for p in plugins:
+                    if not isinstance(p, dict): continue
+                    status = p.get("status", "N/A").strip()
+                    if filter_statuses_list and status.lower() not in filter_statuses_list:
+                        continue
+                    pdf_table_data.append([
+                        container_name,
+                        p.get("name", "N/A"),
+                        status,
+                        p.get("version", "N/A"),
+                        p.get("update", "N/A"),
+                        p.get("auto_update", "N/A")
+                    ])
+
+            t = Table(pdf_table_data, colWidths=col_widths)
             t.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
@@ -265,16 +282,29 @@ def render_plugin_table(all_data, filter_statuses_str=None, for_pdf=False, pdf_e
         except Exception as e: # Handle cases where table data might be problematic for reportlab
             pdf_elements.append(Paragraph(f"Error generating plugin table for PDF: {e}", pdf_styles['Normal']))
             # Fallback to text representation for PDF
-            text_table_str = "\n".join([" | ".join(map(str, row)) for row in table_data])
+            text_table_str = "\n".join([" | ".join(map(str, row)) for row in table_data]) # Use stringified table_data for fallback
             pdf_elements.append(Paragraph("Plugin List (Text Fallback):", pdf_styles['h3']))
             pdf_elements.append(Paragraph(text_table_str.replace("\n", "<br/>\n"), pdf_styles['Code']))
 
     else: # Console output
-        # Caller should print a title if desired.
-        # Determine max column widths for alignment (optional, can be slow for many rows)
-        # For now, simple tab-separated like output
-        for row in table_data:
-            print("\t".join(map(str,row)))
+        # Calculate column widths
+        num_cols = len(header)
+        col_widths = [0] * num_cols
+        for row_idx, row_data in enumerate(table_data):
+            for col_idx, cell_data in enumerate(row_data):
+                col_widths[col_idx] = max(col_widths[col_idx], len(str(cell_data)))
+
+        # Print table with padding
+        separator_line = "+-" + "-+-".join(["-" * w for w in col_widths]) + "-+"
+        print(separator_line)
+        for row_idx, row_data in enumerate(table_data):
+            formatted_row = []
+            for col_idx, cell_data in enumerate(row_data):
+                formatted_row.append(str(cell_data).ljust(col_widths[col_idx]))
+            print("| " + " | ".join(formatted_row) + " |")
+            if row_idx == 0: # After header
+                print(separator_line)
+        print(separator_line)
 
 def main():
     args = parse_args()
