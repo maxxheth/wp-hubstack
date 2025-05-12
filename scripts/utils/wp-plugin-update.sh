@@ -713,7 +713,7 @@ update_plugin_group() {
         local update_stderr_file
         update_stderr_file=$(mktemp)
         # Pass the single plugin slug directly to the update command
-        if ${WP_CMD} plugin update "$plugin_slug" 2> "$update_stderr_file"; then
+        if WP_CLI_PHP_ARGS="-d max_execution_time=300" ${WP_CMD} plugin update "$plugin_slug" 2> "$update_stderr_file"; then
             echo "  Successfully updated: $plugin_slug"
             SUCCESSFUL_PLUGINS+=("$plugin_slug")
         else
@@ -1022,7 +1022,7 @@ if [ "$DRY_RUN_FLAG" = false ]; then
                 # Temporary file, not local
                 update_stderr_file_all_rem=$(mktemp)
                 # Pass the array of remaining plugins to the update command
-                if ${WP_CMD} plugin update "${REMAINING_PLUGINS_TO_UPDATE[@]}" 2> "$update_stderr_file_all_rem"; then
+                if WP_CLI_PHP_ARGS="-d max_execution_time=600" ${WP_CMD} plugin update "${REMAINING_PLUGINS_TO_UPDATE[@]}" 2> "$update_stderr_file_all_rem"; then
                     echo "Successfully updated remaining plugins group."
                     for p_slug in "${REMAINING_PLUGINS_TO_UPDATE[@]}"; do
                         # Variables for checks, not local
@@ -1062,7 +1062,7 @@ if [ "$DRY_RUN_FLAG" = false ]; then
             # Temporary file, not local
             update_stderr_file_all_gen=$(mktemp)
             # Pass the array of all plugins to update to the command
-            if ${WP_CMD} plugin update "${PLUGINS_TO_UPDATE[@]}" 2> "$update_stderr_file_all_gen"; then
+            if WP_CLI_PHP_ARGS="-d max_execution_time=600" ${WP_CMD} plugin update "${PLUGINS_TO_UPDATE[@]}" 2> "$update_stderr_file_all_gen"; then
                 echo "Successfully updated all plugins."
                 # Mark all plugins from PLUGINS_TO_UPDATE as successful if the batch command succeeded
                 # and they haven't been marked as failed from a prior (e.g. priority) step.
@@ -1110,7 +1110,7 @@ if [ "$DRY_RUN_FLAG" = false ]; then
             echo "Updating plugin (individual mode): $plugin_slug_ind"
             # Temporary file, not local
             update_stderr_file_ind=$(mktemp)
-            if ${WP_CMD} plugin update "$plugin_slug_ind" 2> "$update_stderr_file_ind"; then
+            if WP_CLI_PHP_ARGS="-d max_execution_time=300" ${WP_CMD} plugin update "$plugin_slug_ind" 2> "$update_stderr_file_ind"; then
                 echo "Successfully updated: $plugin_slug_ind"
                 SUCCESSFUL_PLUGINS+=("$plugin_slug_ind")
             else
