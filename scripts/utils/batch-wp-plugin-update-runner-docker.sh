@@ -18,6 +18,7 @@ SKIP_WP_DOCTOR_BATCH_FLAG=false
 SKIP_PLUGINS_BATCH_FLAG=false
 SKIP_BACKUP_BATCH_FLAG=false
 DRY_RUN_BATCH_FLAG=false # New flag
+CUSTOM_PLUGINS_DIR="" # New flag for custom plugins directory
 
 # --- Argument Parsing ---
 while [[ "$#" -gt 0 ]]; do
@@ -54,6 +55,9 @@ while [[ "$#" -gt 0 ]]; do
             SKIP_BACKUP_BATCH_FLAG=true; shift ;;
         --dry-run) # New flag
             DRY_RUN_BATCH_FLAG=true; shift ;;
+        --custom-plugins-dir)
+            if [[ -z "$2" || "$2" == --* ]]; then echo "ERROR: Missing value for --custom-plugins-dir flag." >&2; exit 1; fi
+            CUSTOM_PLUGINS_DIR="$2"; shift 2 ;;
         *)
             echo "ERROR: Unknown option: $1" >&2
             echo "Usage: $0 [--target-dir <dir>] [--subdir <path>]" >&2
@@ -61,6 +65,7 @@ while [[ "$#" -gt 0 ]]; do
             echo "          [--script-dest-in-container <container_script_path>] [--container-wp-path <path>]" >&2
             echo "          [--exclude-checks <check1,check2|none>] [--exclude-containers <name1,name2>]" >&2
             echo "          [--skip-wp-doctor] [--skip-plugins] [--skip-backup] [--dry-run]" >&2
+            echo "          [--custom-plugins-dir <host_plugins_path>]" >&2
             exit 1
             ;;
     esac
@@ -76,6 +81,7 @@ if [ ! -d "$TARGET_DIR" ]; then echo "ERROR: Target directory for reports not fo
 if ! command -v docker &> /dev/null; then echo "ERROR: 'docker' command not found." >&2; exit 1; fi
 if ! command -v awk &> /dev/null; then echo "ERROR: 'awk' command not found." >&2; exit 1; fi
 if ! command -v realpath &> /dev/null; then echo "ERROR: 'realpath' command not found." >&2; exit 1; fi
+if [[ -n "$CUSTOM_PLUGINS_DIR" && ! -d "$CUSTOM_PLUGINS_DIR" ]]; then echo "ERROR: Custom plugins directory not found: $CUSTOM_PLUGINS_DIR" >&2; exit 1; fi
 
 # --- Main Logic ---
 echo "Starting batch WordPress update process (Docker Container Injection Mode)..."
@@ -91,6 +97,7 @@ if [ "$SKIP_WP_DOCTOR_BATCH_FLAG" = true ]; then echo "Pass-through: --skip-wp-d
 if [ "$SKIP_PLUGINS_BATCH_FLAG" = true ]; then echo "Pass-through: --skip-plugins enabled"; fi
 if [ "$SKIP_BACKUP_BATCH_FLAG" = true ]; then echo "Pass-through: --skip-backup enabled"; fi
 if [ "$DRY_RUN_BATCH_FLAG" = true ]; then echo "Pass-through: --dry-run enabled"; fi # New log line
+if [[ -n "$CUSTOM_PLUGINS_DIR" ]]; then echo "Custom Plugins Directory (Host Path): '$CUSTOM_PLUGINS_DIR'"; fi
 
 mapfile -t DOCKER_CONTAINER_NAMES < <(awk 'NR > 1 && $NF ~ /^wp_/ {print $NF}' "$CONTAINER_LIST_FILE")
 
@@ -122,6 +129,51 @@ for DOCKER_CONTAINER_NAME in "${DOCKER_CONTAINER_NAMES[@]}"; do
     echo "Injecting update script '$LOCAL_UPDATE_SCRIPT_PATH' to '$DOCKER_CONTAINER_NAME:$SCRIPT_DEST_IN_CONTAINER'..."
     if ! docker cp "$LOCAL_UPDATE_SCRIPT_PATH" "$DOCKER_CONTAINER_NAME:$SCRIPT_DEST_IN_CONTAINER"; then
         echo "ERROR: Failed to copy update script to container '$DOCKER_CONTAINER_NAME'. Skipping." >&2; echo "---"; overall_success=false; continue
+    fi
+
+    # Copy custom plugins if directory is specified
+    if [[ -n "$CUSTOM_PLUGINS_DIR" ]]; then
+        echo "Copying custom plugins from '$CUSTOM_PLUGINS_DIR' to '$DOCKER_CONTAINER_NAME:$CONTAINER_WP_PATH/wp-content/plugins/'..."
+        if [ -d "$CUSTOM_PLUGINS_DIR" ] && [ -n "$(ls -A "$CUSTOM_PLUGINS_DIR")" ]; then
+            for plugin_item in "$CUSTOM_PLUGINS_DIR"/*; do
+                if [ -e "$plugin_item" ]; then # Check if item exists
+                    plugin_item_name=$(basename "$plugin_item")
+                    plugin_slug=""
+
+                    if [[ -d "$plugin_item" ]]; then
+                        plugin_slug="$plugin_item_name"
+                    elif [[ -f "$plugin_item" && "$plugin_item_name" == *.zip ]]; then
+                        plugin_slug="${plugin_item_name%.zip}"
+                    else
+                        echo "  Skipping '$plugin_item_name': not a recognized plugin directory or .zip file."
+                        continue
+                    fi
+
+                    echo "  Checking status of plugin '$plugin_slug' in container '$DOCKER_CONTAINER_NAME'..."
+
+                    # Check if the plugin is installed in the container
+                    # `wp plugin list --field=name` outputs one plugin slug per line.
+                    # `grep -Fxq "$plugin_slug"` checks for an exact, full line match, quietly.
+                    # It returns 0 if found (installed), 1 if not found (not installed).
+                    if docker exec "$DOCKER_CONTAINER_NAME" wp --allow-root --path="$CONTAINER_WP_PATH" plugin list --field=name --format=csv | grep -Fxq "$plugin_slug"; then
+                        # Plugin is installed. The condition "(!installed AND !active) is false", so we proceed to copy.
+                        echo "  Plugin '$plugin_slug' is installed in container. Proceeding with copy/update of '$plugin_item_name'..."
+                        if docker cp "$plugin_item" "$DOCKER_CONTAINER_NAME:$CONTAINER_WP_PATH/wp-content/plugins/"; then
+                            echo "  Successfully copied '$plugin_item_name' (slug: '$plugin_slug')."
+                        else
+                            echo "  WARNING: Failed to copy '$plugin_item_name' (slug: '$plugin_slug') to container '$DOCKER_CONTAINER_NAME'." >&2
+                            # Decide if this should set overall_success to false or just be a warning
+                        fi
+                    else
+                        # Plugin is not installed. Therefore, "is_installed is false" and "is_active is false" are both true.
+                        # As per requirement "If both of those conditions are false, then DO NOT copy", we skip.
+                        echo "  Plugin '$plugin_slug' ('$plugin_item_name') is not installed in container. Skipping copy."
+                    fi
+                fi
+            done
+        else
+            echo "  Custom plugins directory is empty or not found. Skipping plugin copy."
+        fi
     fi
 
     report_filename_in_container="update-results.$REPORT_FORMAT"
