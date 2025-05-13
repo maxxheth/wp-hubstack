@@ -471,12 +471,28 @@ def main():
                     st = p.get("status", "").strip()
                     if st in stats["status"]:
                         stats["status"][st] += 1
-                    update_value = p.get("update", "").strip()
-                    if update_value in stats["update"]:
-                        stats["update"][update_value] += 1
-                    auto_update_value = p.get("auto_update", "").strip()
-                    if auto_update_value in stats["auto_update"]:
-                        stats["auto_update"][auto_update_value] += 1
+                    
+                    # Handle 'update' field
+                    update_val = p.get("update")
+                    upd_str = ""
+                    if isinstance(update_val, str):
+                        upd_str = update_val.strip()
+                    elif isinstance(update_val, bool):
+                        upd_str = "available" if update_val else "none"
+                    
+                    if upd_str in stats["update"]:
+                        stats["update"][upd_str] += 1
+
+                    # Handle 'auto_update' field
+                    auto_update_val = p.get("auto_update")
+                    au_str = ""
+                    if isinstance(auto_update_val, str):
+                        au_str = auto_update_val.strip()
+                    elif isinstance(auto_update_val, bool):
+                        au_str = "on" if auto_update_val else "off"
+
+                    if au_str in stats["auto_update"]:
+                        stats["auto_update"][au_str] += 1
 
         render_stats_charts(stats, args.chart_type, "Overall - ", args.print_pdf, pdf_elements, pdf_styles)
 
