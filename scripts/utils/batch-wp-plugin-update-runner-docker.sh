@@ -126,6 +126,38 @@ for DOCKER_CONTAINER_NAME in "${DOCKER_CONTAINER_NAMES[@]}"; do
     echo "Processing Container: $DOCKER_CONTAINER_NAME"
     sanitized_container_name=$(echo "$DOCKER_CONTAINER_NAME" | sed 's/[^a-zA-Z0-9_-]/_/g')
 
+    # Check for WP-CLI and install if not present
+    echo "  Checking for WP-CLI in container '$DOCKER_CONTAINER_NAME'..."
+    if ! docker exec "$DOCKER_CONTAINER_NAME" command -v wp &>/dev/null; then
+        echo "  WP-CLI not found in container '$DOCKER_CONTAINER_NAME'. Attempting to install..."
+        
+        HOST_TEMP_WP_CLI_PATH="/tmp/wp-cli.phar-$(date +%s%N)" # Unique temp file name
+        echo "  Downloading WP-CLI to host at '$HOST_TEMP_WP_CLI_PATH'..."
+        if curl -sSL -o "$HOST_TEMP_WP_CLI_PATH" https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar; then
+            chmod +x "$HOST_TEMP_WP_CLI_PATH"
+            echo "  Copying WP-CLI from host '$HOST_TEMP_WP_CLI_PATH' to container '$DOCKER_CONTAINER_NAME:/usr/local/bin/wp'..."
+            if docker cp "$HOST_TEMP_WP_CLI_PATH" "$DOCKER_CONTAINER_NAME:/usr/local/bin/wp"; then
+                echo "  Successfully installed WP-CLI in container '$DOCKER_CONTAINER_NAME'."
+            else
+                echo "  ERROR: Failed to copy WP-CLI to container '$DOCKER_CONTAINER_NAME'. Skipping this container." >&2
+                overall_success=false
+                echo "---"
+                rm -f "$HOST_TEMP_WP_CLI_PATH" # Clean up temp file
+                continue
+            fi
+            rm -f "$HOST_TEMP_WP_CLI_PATH" # Clean up temp file
+        else
+            echo "  ERROR: Failed to download WP-CLI to host. Skipping WP-CLI installation for '$DOCKER_CONTAINER_NAME'." >&2
+            overall_success=false
+            echo "---"
+            # No temp file to clean if download failed, but check just in case part of it exists
+            rm -f "$HOST_TEMP_WP_CLI_PATH" 
+            continue
+        fi
+    else
+        echo "  WP-CLI already installed in container '$DOCKER_CONTAINER_NAME'."
+    fi
+
     echo "Injecting update script '$LOCAL_UPDATE_SCRIPT_PATH' to '$DOCKER_CONTAINER_NAME:$SCRIPT_DEST_IN_CONTAINER'..."
     if ! docker cp "$LOCAL_UPDATE_SCRIPT_PATH" "$DOCKER_CONTAINER_NAME:$SCRIPT_DEST_IN_CONTAINER"; then
         echo "ERROR: Failed to copy update script to container '$DOCKER_CONTAINER_NAME'. Skipping." >&2; echo "---"; overall_success=false; continue
@@ -160,6 +192,25 @@ for DOCKER_CONTAINER_NAME in "${DOCKER_CONTAINER_NAMES[@]}"; do
                         echo "  Plugin '$plugin_slug' is installed in container. Proceeding with copy/update of '$plugin_item_name'..."
                         if docker cp "$plugin_item" "$DOCKER_CONTAINER_NAME:$CONTAINER_WP_PATH/wp-content/plugins/"; then
                             echo "  Successfully copied '$plugin_item_name' (slug: '$plugin_slug')."
+
+                            # Check if the (copied/updated) plugin is active
+                            echo "  Checking active status of plugin '$plugin_slug' in container..."
+                            # Get status; output will be 'active', 'inactive', or empty/error if not determinable.
+                            plugin_status_output=$(docker exec "$DOCKER_CONTAINER_NAME" wp --allow-root --path="$CONTAINER_WP_PATH" plugin list --name="$plugin_slug" --field=status --format=csv 2>/dev/null)
+
+                            if [[ "$plugin_status_output" == "inactive" ]]; then
+                                echo "  Plugin '$plugin_slug' is installed but inactive. Attempting to activate..."
+                                if docker exec "$DOCKER_CONTAINER_NAME" wp --allow-root --path="$CONTAINER_WP_PATH" plugin activate "$plugin_slug"; then
+                                    echo "  Successfully activated plugin '$plugin_slug'."
+                                else
+                                    echo "  WARNING: Failed to activate plugin '$plugin_slug' in container '$DOCKER_CONTAINER_NAME'." >&2
+                                    # Consider if overall_success should be set to false here
+                                fi
+                            elif [[ "$plugin_status_output" == "active" ]]; then
+                                echo "  Plugin '$plugin_slug' is already active."
+                            else
+                                echo "  Could not determine status or plugin '$plugin_slug' is not in a recognized state (status: '$plugin_status_output'). Manual check may be required." >&2
+                            fi
                         else
                             echo "  WARNING: Failed to copy '$plugin_item_name' (slug: '$plugin_slug') to container '$DOCKER_CONTAINER_NAME'." >&2
                             # Decide if this should set overall_success to false or just be a warning
@@ -199,7 +250,7 @@ for DOCKER_CONTAINER_NAME in "${DOCKER_CONTAINER_NAMES[@]}"; do
         echo "Update script finished successfully inside container for $DOCKER_CONTAINER_NAME."
     else
         script_exit_code=$?
-        echo "WARNING: Update script failed or reported errors inside container for $DOCKER_CONTAINER_NAME (Exit Code: $script_exit_code)." >&2
+        printf "WARNING: Update script failed or reported errors inside container for $DOCKER_CONTAINER_NAME (Exit Code: $script_exit_code)." >&2
         overall_success=false # Mark overall process as failed if any script fails
     fi
 
