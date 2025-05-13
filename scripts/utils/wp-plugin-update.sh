@@ -271,6 +271,7 @@ fi
 
 # --- Plugin Update Logic ---
 echo "Attempting to update Rank Math SEO..."
+
 $WP_CMD_UPDATE plugin update seo-by-rank-math || warning_msg "Update command for 'seo-by-rank-math' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
 $WP_CMD_UPDATE plugin update seo-by-rank-math-pro || warning_msg "Update command for 'seo-by-rank-math-pro' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
 
@@ -278,7 +279,108 @@ echo "Attempting to update Elementor..."
 $WP_CMD_UPDATE plugin update elementor || warning_msg "Update command for 'elementor' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
 $WP_CMD_UPDATE plugin update elementor-pro || warning_msg "Update command for 'elementor-pro' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
 
+echo "Attempting to update Accelerated Mobile Pages (AMP)..."
+
+$WP_CMD_UPDATE plugin update accelerated-mobile-pages || warning_msg "Update command for 'accelerated-mobile-pages' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Advanced AJAX Product Filters for WooCommerce..."
+
+$WP_CMD_UPDATE plugin update woocommerce-ajax-filters || warning_msg "Update command for 'advanced-ajax-product-filters-for-woocommerce' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update All-in-One WP Migration..."
+
+$WP_CMD_UPDATE plugin update all-in-one-wp-migration || warning_msg "Update command for 'all-in-one-wp-migration' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Astra Pro..."
+
+$WP_CMD_UPDATE plugin update astra-pro || warning_msg "Update command for 'astra-pro' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update B Slider..."
+
+$WP_CMD_UPDATE plugin update b-slider || warning_msg "Update command for 'b-slider' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Better Find and Replace..."
+
+$WP_CMD_UPDATE plugin update real-time-auto-find-and-replace || warning_msg "Update command for 'real-time-auto-find-and-replace' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Big File Uploads..."
+
+$WP_CMD_UPDATE plugin update tuxedo-big-file-uploads || warning_msg "Update command for 'tuxedo-big-file-uploads' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Compact Audio Player..."
+
+$WP_CMD_UPDATE plugin update compact-audio-player || warning_msg "Update command for 'compact-audio-player' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Contact Form 7..."
+
+$WP_CMD_UPDATE plugin update contact-form-7 || warning_msg "Update command for 'contact-form-7' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Head, Footer and Post Injections..."
+
+$WP_CMD_UPDATE plugin update header-footer || warning_msg "Update command for 'header-footer' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Master Addons for Elementor..."
+
+$WP_CMD_UPDATE plugin update master-addons || warning_msg "Update command for 'master-addons' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update MWB HubSpot for WooCommerce..."
+
+$WP_CMD_UPDATE plugin update makewebbetter-hubspot-for-woocommerce || warning_msg "Update command for 'makewebbetter-hubspot-for-woocommerce' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Pionet Addons for Elementor..."
+
+$WP_CMD_UPDATE plugin update pionet-addons-for-elementor || warning_msg "Update command for 'pionet-addons-for-elementor' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Relevanssi..."
+
+$WP_CMD_UPDATE plugin update relevanssi || warning_msg "Update command for 'relevanssi' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Sassy Social Share..."
+
+$WP_CMD_UPDATE plugin update sassy-social-share || warning_msg "Update command for 'sassy-social-share' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update ShareThis Dashboard for Google Analytics..."
+
+$WP_CMD_UPDATE plugin update googleanalytics || warning_msg "Update command for 'googleanalytics' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Shortcodes Ultimate..."
+
+$WP_CMD_UPDATE plugin update shortcodes-ultimate || warning_msg "Update command for 'shortcodes-ultimate' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update ShiftNav Pro..."
+
+$WP_CMD_UPDATE plugin update shiftnav-pro-responsive-mobile-menu || warning_msg "Update command for 'shiftnav-pro' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Shortcoder..."
+
+$WP_CMD_UPDATE plugin update shortcoder || warning_msg "Update command for 'shortcoder' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Simple 301 Redirects..."
+
+$WP_CMD_UPDATE plugin update simple-301-redirects || warning_msg "Update command for 'simple-301-redirects' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Simple Custom CSS and JS..."
+
+$WP_CMD_UPDATE plugin update simple-custom-css-and-js || warning_msg "Update command for 'simple-custom-css-and-js' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Gravity Forms..."
+
+$WP_CMD_UPDATE plugin update gravityforms || warning_msg "Update command for 'gravityforms' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Ultimate Elementor..."
+
+$WP_CMD_UPDATE plugin update ultimate-elementor || warning_msg "Update command for 'ultimate-elementor' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Schema & Structured Data for WP & AMP..."
+
+$WP_CMD_UPDATE plugin update schema-and-structured-data-for-wp || warning_msg "Update command for 'schema-and-structured-data-for-wp' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
+echo "Attempting to update Yoast..."
+
+$WP_CMD_UPDATE plugin update wordpress-seo || warning_msg "Update command for 'wordpress-seo' finished. It might have failed, or the plugin was not found/already up-to-date. Check output."
+
 echo "Attempting to update all other plugins..."
+
 $WP_CMD_UPDATE plugin update --all || warning_msg "Update command for '--all' plugins finished. It might have failed, or no other updates were available. Check output."
 
 echo "Plugin update sequence completed."
