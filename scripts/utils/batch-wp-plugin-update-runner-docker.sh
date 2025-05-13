@@ -140,7 +140,7 @@ for DOCKER_CONTAINER_NAME in "${DOCKER_CONTAINER_NAMES[@]}"; do
     if [ "$DRY_RUN_BATCH_FLAG" = true ]; then SCRIPT_ARGS+=("--dry-run"); fi # Pass flag to inner script
     SCRIPT_ARGS+=("$CONTAINER_WP_PATH") # This is the WP_DIR for the script inside the container
 
-    DOCKER_EXEC_CMD=(docker --user root exec -i "$DOCKER_CONTAINER_NAME" bash "$SCRIPT_DEST_IN_CONTAINER" "${SCRIPT_ARGS[@]}")
+    DOCKER_EXEC_CMD=(docker exec -i --user root "$DOCKER_CONTAINER_NAME" bash "$SCRIPT_DEST_IN_CONTAINER" "${SCRIPT_ARGS[@]}")
 
     echo "Running update script '$SCRIPT_DEST_IN_CONTAINER' inside container '$DOCKER_CONTAINER_NAME'..."
     if "${DOCKER_EXEC_CMD[@]}"; then
