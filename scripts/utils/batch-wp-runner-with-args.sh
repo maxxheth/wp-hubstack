@@ -41,3 +41,7 @@ docker ps > /var/opt/docker-containers.txt
 #./batch-wp-plugin-update-runner-docker.sh --local-update-script /var/opt/wp-plugin-update.sh --container-list-file /var/opt/docker-containers.txt --exclude-checks core-update,constant-wp-debug-falsy,cache-flush
 ./batch-wp-plugin-update-runner-docker.sh --local-update-script /var/opt/wp-plugin-update.sh --container-list-file /var/opt/docker-containers.txt --exclude-checks core-update,constant-wp-debug-falsy,cache-flush --skip-plugins --skip-wp-doctor --custom-plugins-dir /var/opt/shared/plugins
 #./batch-wp-plugin-update-runner-docker.sh "$@"
+
+rm -rf ./venv
+
+./report-runner.sh
