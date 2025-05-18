@@ -158,6 +158,22 @@ for DOCKER_CONTAINER_NAME in "${DOCKER_CONTAINER_NAMES[@]}"; do
         echo "  WP-CLI already installed in container '$DOCKER_CONTAINER_NAME'."
     fi
 
+    # Verify WP-CLI can connect to the WordPress installation (implies DB connectivity)
+    echo "  Verifying WP-CLI can connect to WordPress in '$DOCKER_CONTAINER_NAME'..."
+    wp_connect_check_output=$(docker exec "$DOCKER_CONTAINER_NAME" wp --allow-root --path="$CONTAINER_WP_PATH" core is-installed 2>&1)
+
+    if [[ "$wp_connect_check_output" == *"Error: Error establishing a database connection."* ]]; then
+        echo "  ERROR: WP-CLI in '$DOCKER_CONTAINER_NAME' cannot establish a database connection. Skipping this container." >&2
+        echo "  WP-CLI output: $wp_connect_check_output" >&2
+        overall_success=false
+        echo "---"
+        continue
+    else
+        # If `wp core is-installed` failed for other reasons, it might print to stderr,
+        # but we are only explicitly skipping on the database connection error.
+        echo "  WP-CLI connection to WordPress verified for '$DOCKER_CONTAINER_NAME' (or no specific DB connection error found)."
+    fi
+
     echo "Injecting update script '$LOCAL_UPDATE_SCRIPT_PATH' to '$DOCKER_CONTAINER_NAME:$SCRIPT_DEST_IN_CONTAINER'..."
     if ! docker cp "$LOCAL_UPDATE_SCRIPT_PATH" "$DOCKER_CONTAINER_NAME:$SCRIPT_DEST_IN_CONTAINER"; then
         echo "ERROR: Failed to copy update script to container '$DOCKER_CONTAINER_NAME'. Skipping." >&2; echo "---"; overall_success=false; continue
