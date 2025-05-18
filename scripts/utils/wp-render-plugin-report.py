@@ -341,7 +341,8 @@ def main():
     if args.print_pdf:
         pdf_styles = getSampleStyleSheet()
         # Add a monospaced style for plotext output
-        pdf_styles.add(ParagraphStyle(name='Code', fontName='Courier', fontSize=8, leading=8.8, alignment=TA_LEFT))
+        if 'Code' not in pdf_styles: # Check if 'Code' style already exists
+            pdf_styles.add(ParagraphStyle(name='Code', fontName='Courier', fontSize=8, leading=8.8, alignment=TA_LEFT))
         pdf_elements.append(Paragraph("WordPress Plugin Report", pdf_styles['h1']))
         pdf_elements.append(Spacer(1, 0.3 * inch))
 
