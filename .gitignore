@@ -1,3 +1,4 @@
 /scripts/utils/plugin-reports
 /scripts/utils/reports
 /scripts/utils/.env
+/scripts/utils/*.json
