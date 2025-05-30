@@ -76,8 +76,13 @@ def process_single_site(site_name, plugin_source_dir, plugin_slug,
     Processes a single site: checks container, copies plugin, activates plugin.
     Returns a tuple: (success_boolean, message_string)
     """
-    print(f"Processing site (assumed container name): {site_name}")
-    container_name = site_name
+    # Derive container name from site_name
+    # Remove .com (and potentially other common TLDs if needed, for now just .com)
+    base_name = site_name.replace('.com', '') 
+    # Add wp_ prefix
+    container_name = f"wp_{base_name}"
+
+    print(f"Processing site '{site_name}', targeting container: {container_name}")
 
     # 1. Check if container exists and is running
     if not dry_run:
@@ -118,7 +123,7 @@ def process_single_site(site_name, plugin_source_dir, plugin_slug,
 
     # 3. Activate plugin
     print(f"Attempting to activate plugin '{plugin_slug}' in '{container_name}' as root...")
-    wp_cli_full_command_parts = [wp_cli_cmd, 'plugin', 'activate', plugin_slug, f'--path={wp_path_in_container}']
+    wp_cli_full_command_parts = [wp_cli_cmd, 'plugin', 'activate', plugin_slug, f'--path={wp_path_in_container}', '--allow-root']
     docker_exec_cmd = ['sudo', 'docker', 'exec', '-u', 'root', container_name] + wp_cli_full_command_parts
     
     ret_code, stdout, stderr = run_command(docker_exec_cmd, dry_run=dry_run)
@@ -236,6 +241,8 @@ def main():
     site_selection_group = parser.add_mutually_exclusive_group()
     site_selection_group.add_argument('-b', '--base-dir', default=None, help=f"Base directory on HOST containing site directories (scans for '.com'). Default if no CSV: {DEFAULT_SITES_BASE_DIR}")
     site_selection_group.add_argument('-c', '--site-csv', default=None, help="Path to a CSV file listing sites (format: site.com,true|false). Processes if 'false'.")
+    site_selection_group.add_argument('-l', '--site-list', default=None, help="Path to a text file with newline-separated list of sites to process.")
+    site_selection_group.add_argument('-a', '--add-sites', default=None, help="Single site or comma-delimited list of sites to process (e.g., 'site1.com' or 'site1.com,site2.com,site3.com').")
 
     # WP and Docker args
     parser.add_argument('--wp-cli-command', default=DEFAULT_WP_CLI_COMMAND, help=f"WP-CLI command/path in container. Default: {DEFAULT_WP_CLI_COMMAND}")
@@ -267,8 +274,8 @@ def main():
     source_plugin_basename = os.path.basename(args.plugin_source)
     if source_plugin_basename != args.plugin_slug:
         print(f"Warning: Basename of --plugin-source ('{source_plugin_basename}') does not match --plugin-slug ('{args.plugin_slug}').")
-        print("The copied directory in the container will be named '{source_plugin_basename}'.")
-        print("If WP-CLI needs to activate by the slug '{args.plugin_slug}', ensure this is correct or rename your source directory.")
+        print(f"The copied directory in the container will be named '{source_plugin_basename}'.")
+        print(f"If WP-CLI needs to activate by the slug '{args.plugin_slug}', ensure this is correct or rename your source directory.")
 
 
     if args.check_json_key:
@@ -296,6 +303,8 @@ def main():
     print(f"  WP Plugins Dir in Container: {wp_plugins_dir_in_container}")
     if args.site_csv:
         print(f"  Site CSV File: {args.site_csv}")
+    elif args.site_list:
+        print(f"  Site List File: {args.site_list}")
     else:
         args.base_dir = args.base_dir or DEFAULT_SITES_BASE_DIR # Set default if CSV not used and base_dir is None
         print(f"  Sites Base Directory: {args.base_dir}")
@@ -330,7 +339,41 @@ def main():
                         sites_to_process.append(site_name_csv)
         except Exception as e:
             error_exit(f"Error reading CSV file '{args.site_csv}': {e}")
+        
+        if not sites_to_process:
+            error_exit("There are no sites to process.")
+        
         print(f"Identified {len(sites_to_process)} sites from CSV marked 'false' for processing.")
+
+    elif args.site_list:
+        if not os.path.isfile(args.site_list):
+            error_exit(f"Site list file '{args.site_list}' not found.")
+        try:
+            with open(args.site_list, mode='r', encoding='utf-8') as listfile:
+                for i, line in enumerate(listfile, 1):
+                    site_name = line.strip()
+                    if not site_name or site_name.startswith('#'):  # Skip empty lines or comments
+                        continue
+                    sites_to_process.append(site_name)
+        except Exception as e:
+            error_exit(f"Error reading site list file '{args.site_list}': {e}")
+        
+        if not sites_to_process:
+            error_exit("No sites found in the site list file.")
+        
+        print(f"Identified {len(sites_to_process)} sites from list file for processing.")
+
+    elif args.add_sites:
+        # Split by comma and strip whitespace from each site
+        raw_sites = [site.strip() for site in args.add_sites.split(',')]
+        for site in raw_sites:
+            if site:  # Skip empty strings that might result from extra commas
+                sites_to_process.append(site)
+        
+        if not sites_to_process:
+            error_exit("No valid sites found in --add-sites parameter.")
+        
+        print(f"Identified {len(sites_to_process)} sites from --add-sites for processing: {sites_to_process}")
 
     else: # Use base_dir
         if not os.path.isdir(args.base_dir):
@@ -342,7 +385,7 @@ def main():
         print(f"Found {len(sites_to_process)} potential sites in '{args.base_dir}' containing '.com'.")
 
     if not sites_to_process:
-        print("No sites identified for processing.")
+        print("No sites identified for processing.") # This will now primarily catch empty base_dir scenarios
         sys.exit(0)
 
     gsheet_data_rows = []
