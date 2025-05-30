@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+"""
+Traefik Configuration Diff, Deployment, and CrowdSec Integration Test Tool
+
+This comprehensive script provides:
+1. Configuration diffing and deployment with Google Sheets/Docs integration
+2. Automated backup management
+3. CrowdSec + Traefik bouncer integration testing
+
+The CrowdSec testing functionality tests the integration by:
+1. Verifying access to a test service when no ban is active
+2. Banning a test IP using CrowdSec cscli
+3. Verifying access is blocked for the banned IP
+4. Unbanning the IP
+5. Verifying access is restored
+
+Author: Generated for Traefik/CrowdSec configuration management and testing
+"""
 
 import os
 import subprocess
@@ -15,6 +32,12 @@ import yaml
 import shutil
 import difflib
 from typing import Dict, Any, List, Tuple
+import requests
+import time
+import urllib3
+
+# Disable SSL warnings for self-signed certificates in testing
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- Default Configuration ---
 DEFAULT_GOOGLE_CREDENTIALS_FILE = 'path/to/your/google-credentials.json'  # PLEASE REPLACE
@@ -22,7 +45,38 @@ DEFAULT_SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID'  # PLEASE REPLACE
 DEFAULT_TRAEFIK_DIR = '/var/opt/traefik'
 DEFAULT_CURRENT_CONFIG = 'docker-compose.yml'
 DEFAULT_PENDING_CONFIG = 'docker-compose-pending.yml'
-DEFAULT_TEST_SCRIPT = '/var/www/wp-hubstack/scripts/server/test-crowdsec-config.py'
+
+# ================================
+# CROWDSEC TEST CONFIGURATION
+# ================================
+
+# Traefik connection settings
+TRAEFIK_SCHEME = "http"  # "http" or "https"
+TRAEFIK_HOST = "localhost"  # Traefik host/domain
+TRAEFIK_PORT = 80  # Traefik port (80 for HTTP, 443 for HTTPS)
+
+# Test service settings
+TEST_SERVICE_HOST_HEADER = "test-service.yourdomain.com"  # Host header for routing
+TEST_SERVICE_PATH = "/"  # Path to test endpoint
+
+# CrowdSec settings
+CROWDSEC_LAPI_CONTAINER_NAME = "crowdsec"  # CrowdSec LAPI container name
+TEST_IP_TO_BAN = "1.2.3.4"  # IP address to ban/unban for testing
+
+# Expected HTTP status codes
+EXPECTED_STATUS_ALLOWED = 200  # Status when access is allowed
+EXPECTED_STATUS_BLOCKED = 403  # Status when access is blocked by bouncer
+
+# Timing settings
+BOUNCER_SYNC_DELAY_SECONDS = 15  # Wait time for bouncer to sync with LAPI
+
+# HTTP request settings
+REQUEST_TIMEOUT = 10  # Timeout for HTTP requests in seconds
+VERIFY_SSL = False  # Set to True for production HTTPS with valid certs
+
+# ================================
+# UTILITY FUNCTIONS
+# ================================
 
 def sanitize_sheet_name(name):
     """
@@ -72,6 +126,10 @@ def save_yaml_file(data: Dict[Any, Any], file_path: str) -> bool:
     except Exception as e:
         print(f"Error saving YAML file '{file_path}': {e}")
         return False
+
+# ================================
+# DIFF AND DEPLOYMENT FUNCTIONS
+# ================================
 
 def deep_diff_yaml(current: Dict[Any, Any], pending: Dict[Any, Any], path: str = "") -> Dict[str, Any]:
     """Create a deep diff between two YAML structures."""
@@ -142,6 +200,90 @@ def create_diff_yaml(current_file: str, pending_file: str, output_file: str = "d
     else:
         print(f"Failed to save diff to '{output_file}'")
         return {}
+
+def backup_config(config_path: str, dry_run: bool = False) -> str:
+    """Create a timestamped backup of the configuration file."""
+    if not os.path.exists(config_path):
+        print(f"Error: Configuration file '{config_path}' does not exist.")
+        return ""
+    
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = f"{config_path}.backup_{timestamp}"
+    
+    if dry_run:
+        print(f"[DRY RUN] Would create backup: {config_path} -> {backup_path}")
+        return backup_path
+    
+    try:
+        shutil.copy2(config_path, backup_path)
+        print(f"Backup created: {backup_path}")
+        return backup_path
+    except Exception as e:
+        print(f"Error creating backup: {e}")
+        return ""
+
+def deploy_config(diff_file: str, old_config: str, new_config: str, skip_backup: bool = False, dry_run: bool = False) -> bool:
+    """Deploy configuration using diff file to guide the process."""
+    if not os.path.exists(diff_file):
+        print(f"Error: Diff file '{diff_file}' not found.")
+        return False
+    
+    if not os.path.exists(new_config):
+        print(f"Error: New configuration file '{new_config}' not found.")
+        return False
+    
+    if dry_run:
+        print(f"[DRY RUN] Would deploy config from '{new_config}' to '{old_config}'")
+        print(f"[DRY RUN] Using diff file '{diff_file}' for validation")
+        if not skip_backup:
+            print(f"[DRY RUN] Would create backup of '{old_config}' before deployment")
+        else:
+            print(f"[DRY RUN] Backup skipped (--skip-backup flag)")
+        return True
+    
+    try:
+        # Load diff file to understand changes
+        diff_data = load_yaml_file(diff_file)
+        if not diff_data:
+            print("Error: Could not load diff file or file is empty.")
+            return False
+        
+        print("Diff analysis:")
+        diff_info = diff_data.get('diff', {})
+        print(f"  - Added: {len(diff_info.get('added', {}))}")
+        print(f"  - Removed: {len(diff_info.get('removed', {}))}")
+        print(f"  - Modified: {len(diff_info.get('modified', {}))}")
+        
+        # Create backup before deployment (unless skipped)
+        backup_path = ""
+        if not skip_backup:
+            print(f"\n--- CREATING BACKUP ---")
+            backup_path = backup_config(old_config)
+            if not backup_path:
+                print("Failed to create backup. Aborting deployment.")
+                print("Use --skip-backup flag to deploy without backup (not recommended).")
+                return False
+        else:
+            print(f"\n--- BACKUP SKIPPED ---")
+            print("Warning: Deploying without backup (--skip-backup flag specified)")
+        
+        # Deploy new configuration
+        print(f"\n--- DEPLOYING CONFIGURATION ---")
+        shutil.copy2(new_config, old_config)
+        print(f"Configuration deployed successfully from '{new_config}' to '{old_config}'")
+        
+        if backup_path:
+            print(f"Original configuration backed up to: {backup_path}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error during deployment: {e}")
+        return False
+
+# ================================
+# GOOGLE INTEGRATION FUNCTIONS
+# ================================
 
 def create_google_doc(credentials_file: str, title: str, content: str) -> str:
     """Create a Google Doc and return its URL."""
@@ -263,130 +405,262 @@ def update_google_sheet_with_diff(spreadsheet_id: str, sheet_name: str, credenti
         print(f"Error updating Google Sheet: {e}")
         return False
 
-def backup_config(config_path: str, dry_run: bool = False) -> str:
-    """Create a timestamped backup of the configuration file."""
-    if not os.path.exists(config_path):
-        print(f"Error: Configuration file '{config_path}' does not exist.")
-        return ""
-    
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = f"{config_path}.backup_{timestamp}"
-    
-    if dry_run:
-        print(f"[DRY RUN] Would create backup: {config_path} -> {backup_path}")
-        return backup_path
-    
-    try:
-        shutil.copy2(config_path, backup_path)
-        print(f"Backup created: {backup_path}")
-        return backup_path
-    except Exception as e:
-        print(f"Error creating backup: {e}")
-        return ""
+# ================================
+# CROWDSEC TESTING FUNCTIONS
+# ================================
 
-def deploy_config(diff_file: str, old_config: str, new_config: str, dry_run: bool = False) -> bool:
-    """Deploy configuration using diff file to guide the process."""
-    if not os.path.exists(diff_file):
-        print(f"Error: Diff file '{diff_file}' not found.")
-        return False
+def run_cscli_command(command_args):
+    """
+    Execute a cscli command via docker exec.
     
-    if not os.path.exists(new_config):
-        print(f"Error: New configuration file '{new_config}' not found.")
-        return False
+    Args:
+        command_args (list): List of arguments for cscli command
+        
+    Returns:
+        bool: True on success (exit code 0), False otherwise
+    """
+    cmd = ["docker", "exec", CROWDSEC_LAPI_CONTAINER_NAME, "cscli"] + command_args
     
-    if dry_run:
-        print(f"[DRY RUN] Would deploy config from '{new_config}' to '{old_config}'")
-        print(f"[DRY RUN] Using diff file '{diff_file}' for validation")
-        return True
+    print(f"Executing: {' '.join(cmd)}")
     
     try:
-        # Load diff file to understand changes
-        diff_data = load_yaml_file(diff_file)
-        if not diff_data:
-            print("Error: Could not load diff file or file is empty.")
-            return False
-        
-        print("Diff analysis:")
-        diff_info = diff_data.get('diff', {})
-        print(f"  - Added: {len(diff_info.get('added', {}))}")
-        print(f"  - Removed: {len(diff_info.get('removed', {}))}")
-        print(f"  - Modified: {len(diff_info.get('modified', {}))}")
-        
-        # Create backup before deployment
-        backup_path = backup_config(old_config)
-        if not backup_path:
-            print("Failed to create backup. Aborting deployment.")
-            return False
-        
-        # Deploy new configuration
-        shutil.copy2(new_config, old_config)
-        print(f"Configuration deployed successfully from '{new_config}' to '{old_config}'")
-        print(f"Backup available at: {backup_path}")
-        return True
-        
-    except Exception as e:
-        print(f"Error during deployment: {e}")
-        return False
-
-def run_test_script(test_script_path: str, dry_run: bool = False) -> bool:
-    """Run the CrowdSec integration test script."""
-    if not os.path.exists(test_script_path):
-        print(f"Error: Test script '{test_script_path}' not found.")
-        return False
-    
-    if dry_run:
-        print(f"[DRY RUN] Would run test script: {test_script_path}")
-        return True
-    
-    print(f"\n{'='*60}")
-    print("RUNNING CROWDSEC INTEGRATION TESTS")
-    print(f"Test script: {test_script_path}")
-    print(f"{'='*60}")
-    
-    try:
-        # Make sure the test script is executable
-        os.chmod(test_script_path, 0o755)
-        
-        # Run the test script
         result = subprocess.run(
-            ['python3', test_script_path],
-            capture_output=False,  # Let output stream to console
+            cmd,
+            capture_output=True,
             text=True,
-            timeout=300  # 5 minute timeout
+            timeout=30
         )
         
-        success = result.returncode == 0
+        # Print stdout if available
+        if result.stdout.strip():
+            print(f"STDOUT: {result.stdout.strip()}")
         
-        print(f"\n{'='*60}")
-        print(f"TEST SCRIPT COMPLETED: {'SUCCESS' if success else 'FAILED'}")
-        print(f"Exit code: {result.returncode}")
-        print(f"{'='*60}")
+        # Print stderr if available
+        if result.stderr.strip():
+            print(f"STDERR: {result.stderr.strip()}")
+        
+        success = result.returncode == 0
+        print(f"Command {'SUCCEEDED' if success else 'FAILED'} (exit code: {result.returncode})")
         
         return success
         
     except subprocess.TimeoutExpired:
-        print("\nERROR: Test script timed out after 5 minutes")
+        print("ERROR: Command timed out")
         return False
     except Exception as e:
-        print(f"\nERROR: Exception running test script: {e}")
+        print(f"ERROR: Exception executing command: {e}")
         return False
+
+def ban_ip(ip_address, reason="Automated Test Ban", duration="5m"):
+    """
+    Ban an IP address using CrowdSec cscli.
+    
+    Args:
+        ip_address (str): IP address to ban
+        reason (str): Reason for the ban
+        duration (str): Duration of the ban (e.g., "5m", "1h")
+        
+    Returns:
+        bool: True if ban was successful, False otherwise
+    """
+    print(f"\n--- Banning IP: {ip_address} ---")
+    command_args = [
+        "decisions", "add",
+        "--ip", ip_address,
+        "--reason", reason,
+        "--duration", duration
+    ]
+    return run_cscli_command(command_args)
+
+def unban_ip(ip_address):
+    """
+    Unban an IP address using CrowdSec cscli.
+    
+    Args:
+        ip_address (str): IP address to unban
+        
+    Returns:
+        bool: True if unban was successful or no decision existed, False on error
+    """
+    print(f"\n--- Unbanning IP: {ip_address} ---")
+    command_args = [
+        "decisions", "delete",
+        "--ip", ip_address
+    ]
+    # Note: This may "fail" if no decision exists, but that's okay for cleanup
+    return run_cscli_command(command_args)
+
+def check_service_access():
+    """
+    Check access to the test service through Traefik.
+    
+    Returns:
+        int: HTTP status code, or -1 on request failure
+    """
+    url = f"{TRAEFIK_SCHEME}://{TRAEFIK_HOST}:{TRAEFIK_PORT}{TEST_SERVICE_PATH}"
+    headers = {
+        "Host": TEST_SERVICE_HOST_HEADER,
+        "User-Agent": "TraefikCrowdSecTester/1.0"
+    }
+    
+    print(f"Making request to: {url}")
+    print(f"Headers: {headers}")
+    
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+            verify=VERIFY_SSL,
+            allow_redirects=False
+        )
+        
+        status_code = response.status_code
+        print(f"Response status: {status_code}")
+        
+        # Print response headers for debugging
+        print("Response headers:")
+        for key, value in response.headers.items():
+            print(f"  {key}: {value}")
+        
+        return status_code
+        
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: Request failed: {e}")
+        return -1
+
+def print_test_result(test_name, expected, actual, test_number):
+    """Print formatted test result."""
+    passed = expected == actual
+    status = "PASSED" if passed else "FAILED"
+    print(f"\n{'='*50}")
+    print(f"Test {test_number}: {test_name}")
+    print(f"Expected status: {expected}")
+    print(f"Actual status: {actual}")
+    print(f"Result: {status}")
+    print(f"{'='*50}")
+    return passed
+
+def run_crowdsec_integration_tests(dry_run: bool = False) -> bool:
+    """Run the complete CrowdSec integration test suite."""
+    if dry_run:
+        print(f"[DRY RUN] Would run CrowdSec integration tests")
+        return True
+    
+    print(f"\n{'='*60}")
+    print("RUNNING CROWDSEC INTEGRATION TESTS")
+    print(f"{'='*60}")
+    print("Traefik + CrowdSec Bouncer Integration Test")
+    print("=" * 50)
+    print(f"Target URL: {TRAEFIK_SCHEME}://{TRAEFIK_HOST}:{TRAEFIK_PORT}{TEST_SERVICE_PATH}")
+    print(f"Host Header: {TEST_SERVICE_HOST_HEADER}")
+    print(f"Test IP: {TEST_IP_TO_BAN}")
+    print(f"CrowdSec Container: {CROWDSEC_LAPI_CONTAINER_NAME}")
+    print(f"Sync Delay: {BOUNCER_SYNC_DELAY_SECONDS} seconds")
+    print("=" * 50)
+    
+    test_results = []
+    
+    try:
+        # Initial cleanup - ensure test IP is not banned
+        print("\n--- INITIAL CLEANUP ---")
+        unban_result = unban_ip(TEST_IP_TO_BAN)
+        print(f"Initial cleanup result: {'SUCCESS' if unban_result else 'FAILED (may be normal if no existing ban)'}")
+        
+        # Wait for sync after cleanup
+        print(f"\nWaiting {BOUNCER_SYNC_DELAY_SECONDS} seconds for bouncer sync...")
+        time.sleep(BOUNCER_SYNC_DELAY_SECONDS)
+        
+        # Test 1: Access should be allowed (no ban active)
+        print("\n--- TEST 1: ACCESS SHOULD BE ALLOWED ---")
+        status_1 = check_service_access()
+        test_1_passed = print_test_result("Access Allowed", EXPECTED_STATUS_ALLOWED, status_1, 1)
+        test_results.append(("Test 1: Access Allowed", test_1_passed))
+        
+        # Action: Ban the test IP
+        print("\n--- ACTION: BANNING TEST IP ---")
+        ban_result = ban_ip(TEST_IP_TO_BAN)
+        
+        if not ban_result:
+            print("ERROR: Failed to ban IP. Aborting blocking tests.")
+            test_results.append(("Test 2: Access Blocked", False))
+            test_results.append(("Test 3: Access Restored", False))
+        else:
+            print(f"IP ban successful. Waiting {BOUNCER_SYNC_DELAY_SECONDS} seconds for bouncer sync...")
+            time.sleep(BOUNCER_SYNC_DELAY_SECONDS)
+            
+            # Test 2: Access should be blocked (ban active)
+            print("\n--- TEST 2: ACCESS SHOULD BE BLOCKED ---")
+            status_2 = check_service_access()
+            test_2_passed = print_test_result("Access Blocked", EXPECTED_STATUS_BLOCKED, status_2, 2)
+            test_results.append(("Test 2: Access Blocked", test_2_passed))
+            
+            # Action: Unban the test IP (cleanup)
+            print("\n--- ACTION: UNBANNING TEST IP ---")
+            unban_result = unban_ip(TEST_IP_TO_BAN)
+            print(f"Unban result: {'SUCCESS' if unban_result else 'FAILED'}")
+            
+            print(f"Waiting {BOUNCER_SYNC_DELAY_SECONDS} seconds for bouncer sync...")
+            time.sleep(BOUNCER_SYNC_DELAY_SECONDS)
+            
+            # Test 3: Access should be restored (no ban active)
+            print("\n--- TEST 3: ACCESS SHOULD BE RESTORED ---")
+            status_3 = check_service_access()
+            test_3_passed = print_test_result("Access Restored", EXPECTED_STATUS_ALLOWED, status_3, 3)
+            test_results.append(("Test 3: Access Restored", test_3_passed))
+        
+        # Final summary
+        print("\n" + "=" * 60)
+        print("TEST SUMMARY")
+        print("=" * 60)
+        
+        all_passed = True
+        for test_name, passed in test_results:
+            status = "PASSED" if passed else "FAILED"
+            print(f"{test_name}: {status}")
+            if not passed:
+                all_passed = False
+        
+        print("=" * 60)
+        overall_status = "ALL TESTS PASSED" if all_passed else "SOME TESTS FAILED"
+        print(f"Overall Result: {overall_status}")
+        print("=" * 60)
+        
+        return all_passed
+        
+    except KeyboardInterrupt:
+        print("\n\nTest interrupted by user.")
+        print("Attempting cleanup...")
+        unban_ip(TEST_IP_TO_BAN)
+        return False
+    except Exception as e:
+        print(f"\nUnexpected error during tests: {e}")
+        print("Attempting cleanup...")
+        unban_ip(TEST_IP_TO_BAN)
+        return False
+
+# ================================
+# MAIN FUNCTION
+# ================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Traefik Configuration Diff and Deployment Tool with Google Sheets/Docs integration and CrowdSec testing.",
+        description="Traefik Configuration Diff, Deployment, and CrowdSec Integration Test Tool with Google Sheets/Docs integration.",
         formatter_class=argparse.RawTextHelpFormatter
     )
     
-    # Configuration diff args
+    # Configuration diff and deployment args
     parser.add_argument('--diff-confs', help="Compare configurations (format: 'current_config|pending_config')")
     parser.add_argument('--backup-conf', help="Create timestamped backup of configuration file")
     parser.add_argument('--deploy-conf', help="Deploy configuration (format: 'old_config|new_config')")
     
-    # Testing args
-    parser.add_argument('--test-script', default=DEFAULT_TEST_SCRIPT,
-                       help=f"Path to CrowdSec integration test script. Default: {DEFAULT_TEST_SCRIPT}")
+    # Backup and testing args
+    parser.add_argument('--skip-backup', action='store_true',
+                       help="Skip creating backup during deployment (not recommended)")
     parser.add_argument('--skip-tests', action='store_true',
                        help="Skip running integration tests after deployment")
+    parser.add_argument('--test-only', action='store_true',
+                       help="Run only CrowdSec integration tests (no deployment)")
     
     # Google integration args
     parser.add_argument('--creds-file', default=DEFAULT_GOOGLE_CREDENTIALS_FILE, 
@@ -411,6 +685,15 @@ def main():
     
     if args.dry_run:
         print("*** DRY RUN MODE ENABLED - NO ACTUAL CHANGES WILL BE MADE ***")
+    
+    if args.skip_backup:
+        print("*** WARNING: BACKUP DISABLED - ORIGINAL CONFIG WILL NOT BE BACKED UP ***")
+    
+    # Handle test-only mode
+    if args.test_only:
+        print("Running CrowdSec integration tests only...")
+        test_success = run_crowdsec_integration_tests(args.dry_run)
+        sys.exit(0 if test_success else 1)
     
     # Track if any deployment occurred
     deployment_occurred = False
@@ -479,8 +762,8 @@ def main():
                 print("Error: Failed to create diff file for deployment.")
                 sys.exit(1)
         
-        # Deploy configuration
-        if deploy_config(diff_file, old_config, new_config, args.dry_run):
+        # Deploy configuration with backup handling
+        if deploy_config(diff_file, old_config, new_config, args.skip_backup, args.dry_run):
             print("Configuration deployment completed successfully.")
             deployment_occurred = True
         else:
@@ -491,7 +774,7 @@ def main():
     if deployment_occurred and not args.skip_tests:
         print(f"\nDeployment completed. Running integration tests...")
         
-        test_success = run_test_script(args.test_script, args.dry_run)
+        test_success = run_crowdsec_integration_tests(args.dry_run)
         
         if not test_success:
             print("\nWARNING: Integration tests failed after deployment!")
@@ -503,8 +786,8 @@ def main():
         print("\nDeployment completed. Integration tests skipped (--skip-tests flag used).")
     
     # If no main action was specified, show help
-    if not any([args.diff_confs, args.backup_conf, args.deploy_conf]):
-        print("No action specified. Use --diff-confs, --backup-conf, or --deploy-conf.")
+    if not any([args.diff_confs, args.backup_conf, args.deploy_conf, args.test_only]):
+        print("No action specified. Use --diff-confs, --backup-conf, --deploy-conf, or --test-only.")
         parser.print_help()
 
 def error_exit(message):
