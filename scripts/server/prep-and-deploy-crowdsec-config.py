@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+
+import os
+import subprocess
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+import datetime
+import argparse
+import sys
+import socket
+import re
+import yaml
+import shutil
+import difflib
+from typing import Dict, Any, List, Tuple
+
+# --- Default Configuration ---
+DEFAULT_GOOGLE_CREDENTIALS_FILE = 'path/to/your/google-credentials.json'  # PLEASE REPLACE
+DEFAULT_SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID'  # PLEASE REPLACE
+DEFAULT_TRAEFIK_DIR = '/var/opt/traefik'
+DEFAULT_CURRENT_CONFIG = 'docker-compose.yml'
+DEFAULT_PENDING_CONFIG = 'docker-compose-pending.yml'
+DEFAULT_TEST_SCRIPT = '/var/www/wp-hubstack/scripts/server/test-crowdsec-config.py'
+
+def sanitize_sheet_name(name):
+    """
+    Sanitizes a string to be a valid Google Sheet name.
+    """
+    if not isinstance(name, str):
+        name = str(name)
+    name = re.sub(r'[\[\]*/\\?:]', '', name)
+    name = name.replace(' ', '_').replace('.', '_').replace('-', '_')
+    name = name.strip('_')
+    if not name:
+        return "Default_Config_Diff_Sheet"
+    return name[:99]
+
+try:
+    raw_hostname = socket.gethostname()
+    sanitized_hostname = sanitize_sheet_name(raw_hostname)
+    DEFAULT_HOSTNAME_PART = sanitized_hostname if sanitized_hostname else "UnknownServer"
+except Exception:
+    DEFAULT_HOSTNAME_PART = "UnknownServer"
+
+DEFAULT_SHEET_NAME = f'{DEFAULT_HOSTNAME_PART}_Config_Diffs'
+if not DEFAULT_SHEET_NAME.strip() or len(DEFAULT_SHEET_NAME) > 99:
+    DEFAULT_SHEET_NAME = "Default_Server_Config_Diffs"
+
+def load_yaml_file(file_path: str) -> Dict[Any, Any]:
+    """Load and parse a YAML file."""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return yaml.safe_load(file) or {}
+    except FileNotFoundError:
+        print(f"Error: YAML file '{file_path}' not found.")
+        return {}
+    except yaml.YAMLError as e:
+        print(f"Error parsing YAML file '{file_path}': {e}")
+        return {}
+    except Exception as e:
+        print(f"Unexpected error loading YAML file '{file_path}': {e}")
+        return {}
+
+def save_yaml_file(data: Dict[Any, Any], file_path: str) -> bool:
+    """Save data to a YAML file."""
+    try:
+        with open(file_path, 'w', encoding='utf-8') as file:
+            yaml.dump(data, file, default_flow_style=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving YAML file '{file_path}': {e}")
+        return False
+
+def deep_diff_yaml(current: Dict[Any, Any], pending: Dict[Any, Any], path: str = "") -> Dict[str, Any]:
+    """Create a deep diff between two YAML structures."""
+    diff_result = {
+        'added': {},
+        'removed': {},
+        'modified': {},
+        'unchanged': {}
+    }
+    
+    # Get all keys from both dictionaries
+    all_keys = set(current.keys()) | set(pending.keys())
+    
+    for key in all_keys:
+        current_path = f"{path}.{key}" if path else str(key)
+        
+        if key not in current:
+            # Key added in pending
+            diff_result['added'][current_path] = pending[key]
+        elif key not in pending:
+            # Key removed in pending
+            diff_result['removed'][current_path] = current[key]
+        elif current[key] != pending[key]:
+            # Key modified
+            if isinstance(current[key], dict) and isinstance(pending[key], dict):
+                # Recursively diff nested dictionaries
+                nested_diff = deep_diff_yaml(current[key], pending[key], current_path)
+                for diff_type in ['added', 'removed', 'modified', 'unchanged']:
+                    diff_result[diff_type].update(nested_diff[diff_type])
+            else:
+                diff_result['modified'][current_path] = {
+                    'current': current[key],
+                    'pending': pending[key]
+                }
+        else:
+            # Key unchanged
+            diff_result['unchanged'][current_path] = current[key]
+    
+    return diff_result
+
+def create_diff_yaml(current_file: str, pending_file: str, output_file: str = "diff-conf.yml") -> Dict[str, Any]:
+    """Create a diff YAML file comparing current and pending configurations."""
+    print(f"Creating diff between '{current_file}' and '{pending_file}'...")
+    
+    current_config = load_yaml_file(current_file)
+    pending_config = load_yaml_file(pending_file)
+    
+    if not current_config and not pending_config:
+        print("Error: Both configuration files are empty or invalid.")
+        return {}
+    
+    diff_data = deep_diff_yaml(current_config, pending_config)
+    
+    # Add metadata
+    diff_with_metadata = {
+        'metadata': {
+            'current_file': current_file,
+            'pending_file': pending_file,
+            'diff_timestamp': datetime.datetime.now().isoformat(),
+            'hostname': socket.gethostname()
+        },
+        'diff': diff_data
+    }
+    
+    if save_yaml_file(diff_with_metadata, output_file):
+        print(f"Diff saved to '{output_file}'")
+        return diff_with_metadata
+    else:
+        print(f"Failed to save diff to '{output_file}'")
+        return {}
+
+def create_google_doc(credentials_file: str, title: str, content: str) -> str:
+    """Create a Google Doc and return its URL."""
+    try:
+        scope = ['https://www.googleapis.com/auth/documents', 'https://www.googleapis.com/auth/drive']
+        creds = ServiceAccountCredentials.from_json_keyfile_name(credentials_file, scope)
+        
+        # Build the Docs API service
+        docs_service = build('docs', 'v1', credentials=creds)
+        drive_service = build('drive', 'v3', credentials=creds)
+        
+        # Create a new document
+        doc = docs_service.documents().create(body={'title': title}).execute()
+        doc_id = doc.get('documentId')
+        
+        # Insert content into the document
+        requests = [
+            {
+                'insertText': {
+                    'location': {'index': 1},
+                    'text': content
+                }
+            }
+        ]
+        
+        docs_service.documents().batchUpdate(
+            documentId=doc_id,
+            body={'requests': requests}
+        ).execute()
+        
+        # Make the document shareable
+        drive_service.permissions().create(
+            fileId=doc_id,
+            body={'role': 'reader', 'type': 'anyone'}
+        ).execute()
+        
+        doc_url = f"https://docs.google.com/document/d/{doc_id}"
+        print(f"Created Google Doc: {doc_url}")
+        return doc_url
+        
+    except Exception as e:
+        print(f"Error creating Google Doc: {e}")
+        return ""
+
+def format_diff_content(current_file: str, pending_file: str) -> str:
+    """Format diff content for Google Docs with color indicators."""
+    try:
+        with open(current_file, 'r', encoding='utf-8') as f:
+            current_lines = f.readlines()
+        with open(pending_file, 'r', encoding='utf-8') as f:
+            pending_lines = f.readlines()
+    except FileNotFoundError as e:
+        return f"Error reading files: {e}"
+    
+    diff = difflib.unified_diff(
+        current_lines, 
+        pending_lines, 
+        fromfile=f"Current: {current_file}",
+        tofile=f"Pending: {pending_file}",
+        lineterm=''
+    )
+    
+    content = f"Traefik Configuration Diff\n"
+    content += f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    content += f"Hostname: {socket.gethostname()}\n"
+    content += "=" * 80 + "\n\n"
+    
+    content += "Legend:\n"
+    content += "- Lines starting with '-' (RED): Removed from current config\n"
+    content += "- Lines starting with '+' (GREEN): Added in pending config\n"
+    content += "- Lines starting with ' ' (UNCHANGED): No changes\n\n"
+    
+    for line in diff:
+        if line.startswith('-'):
+            content += f"[RED] {line}\n"
+        elif line.startswith('+'):
+            content += f"[GREEN] {line}\n"
+        else:
+            content += f"{line}\n"
+    
+    return content
+
+def update_google_sheet_with_diff(spreadsheet_id: str, sheet_name: str, credentials_file: str, 
+                                doc_url: str, hostname: str, dry_run: bool = False) -> bool:
+    """Update Google Sheet with diff information."""
+    if dry_run:
+        print(f"[DRY RUN] Would update Google Sheet '{sheet_name}' with diff information")
+        print(f"[DRY RUN] Document URL: {doc_url}")
+        return True
+    
+    try:
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds = ServiceAccountCredentials.from_json_keyfile_name(credentials_file, scope)
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_key(spreadsheet_id)
+        
+        try:
+            sheet = spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            print(f"Worksheet '{sheet_name}' not found. Creating it...")
+            sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols=3)
+            print(f"Worksheet '{sheet_name}' created.")
+        
+        # Check if header exists
+        header = ["Date of Diff", "Hostname", "Diff"]
+        all_values = sheet.get_all_values()
+        if not all_values or sheet.row_values(1) != header:
+            sheet.update('A1', [header], value_input_option='USER_ENTERED')
+        
+        # Add new row with diff information
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        new_row = [timestamp, hostname, doc_url]
+        sheet.append_row(new_row, value_input_option='USER_ENTERED')
+        
+        print(f"Google Sheet '{sheet_name}' updated successfully.")
+        return True
+        
+    except Exception as e:
+        print(f"Error updating Google Sheet: {e}")
+        return False
+
+def backup_config(config_path: str, dry_run: bool = False) -> str:
+    """Create a timestamped backup of the configuration file."""
+    if not os.path.exists(config_path):
+        print(f"Error: Configuration file '{config_path}' does not exist.")
+        return ""
+    
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = f"{config_path}.backup_{timestamp}"
+    
+    if dry_run:
+        print(f"[DRY RUN] Would create backup: {config_path} -> {backup_path}")
+        return backup_path
+    
+    try:
+        shutil.copy2(config_path, backup_path)
+        print(f"Backup created: {backup_path}")
+        return backup_path
+    except Exception as e:
+        print(f"Error creating backup: {e}")
+        return ""
+
+def deploy_config(diff_file: str, old_config: str, new_config: str, dry_run: bool = False) -> bool:
+    """Deploy configuration using diff file to guide the process."""
+    if not os.path.exists(diff_file):
+        print(f"Error: Diff file '{diff_file}' not found.")
+        return False
+    
+    if not os.path.exists(new_config):
+        print(f"Error: New configuration file '{new_config}' not found.")
+        return False
+    
+    if dry_run:
+        print(f"[DRY RUN] Would deploy config from '{new_config}' to '{old_config}'")
+        print(f"[DRY RUN] Using diff file '{diff_file}' for validation")
+        return True
+    
+    try:
+        # Load diff file to understand changes
+        diff_data = load_yaml_file(diff_file)
+        if not diff_data:
+            print("Error: Could not load diff file or file is empty.")
+            return False
+        
+        print("Diff analysis:")
+        diff_info = diff_data.get('diff', {})
+        print(f"  - Added: {len(diff_info.get('added', {}))}")
+        print(f"  - Removed: {len(diff_info.get('removed', {}))}")
+        print(f"  - Modified: {len(diff_info.get('modified', {}))}")
+        
+        # Create backup before deployment
+        backup_path = backup_config(old_config)
+        if not backup_path:
+            print("Failed to create backup. Aborting deployment.")
+            return False
+        
+        # Deploy new configuration
+        shutil.copy2(new_config, old_config)
+        print(f"Configuration deployed successfully from '{new_config}' to '{old_config}'")
+        print(f"Backup available at: {backup_path}")
+        return True
+        
+    except Exception as e:
+        print(f"Error during deployment: {e}")
+        return False
+
+def run_test_script(test_script_path: str, dry_run: bool = False) -> bool:
+    """Run the CrowdSec integration test script."""
+    if not os.path.exists(test_script_path):
+        print(f"Error: Test script '{test_script_path}' not found.")
+        return False
+    
+    if dry_run:
+        print(f"[DRY RUN] Would run test script: {test_script_path}")
+        return True
+    
+    print(f"\n{'='*60}")
+    print("RUNNING CROWDSEC INTEGRATION TESTS")
+    print(f"Test script: {test_script_path}")
+    print(f"{'='*60}")
+    
+    try:
+        # Make sure the test script is executable
+        os.chmod(test_script_path, 0o755)
+        
+        # Run the test script
+        result = subprocess.run(
+            ['python3', test_script_path],
+            capture_output=False,  # Let output stream to console
+            text=True,
+            timeout=300  # 5 minute timeout
+        )
+        
+        success = result.returncode == 0
+        
+        print(f"\n{'='*60}")
+        print(f"TEST SCRIPT COMPLETED: {'SUCCESS' if success else 'FAILED'}")
+        print(f"Exit code: {result.returncode}")
+        print(f"{'='*60}")
+        
+        return success
+        
+    except subprocess.TimeoutExpired:
+        print("\nERROR: Test script timed out after 5 minutes")
+        return False
+    except Exception as e:
+        print(f"\nERROR: Exception running test script: {e}")
+        return False
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Traefik Configuration Diff and Deployment Tool with Google Sheets/Docs integration and CrowdSec testing.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    
+    # Configuration diff args
+    parser.add_argument('--diff-confs', help="Compare configurations (format: 'current_config|pending_config')")
+    parser.add_argument('--backup-conf', help="Create timestamped backup of configuration file")
+    parser.add_argument('--deploy-conf', help="Deploy configuration (format: 'old_config|new_config')")
+    
+    # Testing args
+    parser.add_argument('--test-script', default=DEFAULT_TEST_SCRIPT,
+                       help=f"Path to CrowdSec integration test script. Default: {DEFAULT_TEST_SCRIPT}")
+    parser.add_argument('--skip-tests', action='store_true',
+                       help="Skip running integration tests after deployment")
+    
+    # Google integration args
+    parser.add_argument('--creds-file', default=DEFAULT_GOOGLE_CREDENTIALS_FILE, 
+                       help=f"Path to Google service account JSON key. Default: {DEFAULT_GOOGLE_CREDENTIALS_FILE}")
+    parser.add_argument('--spreadsheet-id', default=DEFAULT_SPREADSHEET_ID, 
+                       help=f"Google Sheet ID. Default: {DEFAULT_SPREADSHEET_ID}")
+    parser.add_argument('--sheet-name', default=DEFAULT_SHEET_NAME, 
+                       help=f"Worksheet name. Default: '{DEFAULT_SHEET_NAME}'")
+    
+    # Action args
+    parser.add_argument('--dry-run', action='store_true', help="Simulate execution without making changes.")
+    
+    args = parser.parse_args()
+    
+    # Sanitize sheet name
+    args.sheet_name = sanitize_sheet_name(args.sheet_name)
+    if not args.sheet_name.strip() or len(args.sheet_name) > 99:
+        print(f"Warning: Invalid sheet name. Using default: {DEFAULT_SHEET_NAME}")
+        args.sheet_name = DEFAULT_SHEET_NAME
+    
+    hostname = socket.gethostname()
+    
+    if args.dry_run:
+        print("*** DRY RUN MODE ENABLED - NO ACTUAL CHANGES WILL BE MADE ***")
+    
+    # Track if any deployment occurred
+    deployment_occurred = False
+    
+    # Handle diff-confs
+    if args.diff_confs:
+        if '|' not in args.diff_confs:
+            print("Error: --diff-confs requires format 'current_config|pending_config'")
+            sys.exit(1)
+        
+        current_config, pending_config = args.diff_confs.split('|', 1)
+        current_config = current_config.strip()
+        pending_config = pending_config.strip()
+        
+        print(f"Comparing configurations: '{current_config}' vs '{pending_config}'")
+        
+        # Create diff
+        diff_data = create_diff_yaml(current_config, pending_config)
+        if not diff_data:
+            print("Error: Failed to create diff.")
+            sys.exit(1)
+        
+        # Create Google Doc with diff content
+        if not args.dry_run:
+            if args.creds_file == DEFAULT_GOOGLE_CREDENTIALS_FILE or args.spreadsheet_id == DEFAULT_SPREADSHEET_ID:
+                print("Warning: Using default placeholder values for Google integration.")
+            
+            if os.path.exists(args.creds_file):
+                doc_title = f"{hostname} Traefik Config Diff"
+                diff_content = format_diff_content(current_config, pending_config)
+                doc_url = create_google_doc(args.creds_file, doc_title, diff_content)
+                
+                if doc_url:
+                    # Update Google Sheet
+                    update_google_sheet_with_diff(
+                        args.spreadsheet_id, args.sheet_name, args.creds_file,
+                        doc_url, hostname, args.dry_run
+                    )
+                else:
+                    print("Failed to create Google Doc.")
+            else:
+                print(f"Google credentials file '{args.creds_file}' not found. Skipping Google integration.")
+        else:
+            print("[DRY RUN] Would create Google Doc and update spreadsheet")
+    
+    # Handle backup-conf
+    if args.backup_conf:
+        backup_config(args.backup_conf, args.dry_run)
+    
+    # Handle deploy-conf
+    if args.deploy_conf:
+        if '|' not in args.deploy_conf:
+            print("Error: --deploy-conf requires format 'old_config|new_config'")
+            sys.exit(1)
+        
+        old_config, new_config = args.deploy_conf.split('|', 1)
+        old_config = old_config.strip()
+        new_config = new_config.strip()
+        
+        # Check if diff file exists, create if not
+        diff_file = "diff-conf.yml"
+        if not os.path.exists(diff_file):
+            print(f"Diff file '{diff_file}' not found. Creating it...")
+            diff_data = create_diff_yaml(old_config, new_config, diff_file)
+            if not diff_data:
+                print("Error: Failed to create diff file for deployment.")
+                sys.exit(1)
+        
+        # Deploy configuration
+        if deploy_config(diff_file, old_config, new_config, args.dry_run):
+            print("Configuration deployment completed successfully.")
+            deployment_occurred = True
+        else:
+            print("Configuration deployment failed.")
+            sys.exit(1)
+    
+    # Run integration tests if deployment occurred and tests are not skipped
+    if deployment_occurred and not args.skip_tests:
+        print(f"\nDeployment completed. Running integration tests...")
+        
+        test_success = run_test_script(args.test_script, args.dry_run)
+        
+        if not test_success:
+            print("\nWARNING: Integration tests failed after deployment!")
+            print("Please review the test output and verify your configuration.")
+            # Don't exit with error code as deployment was successful
+        else:
+            print("\nIntegration tests passed successfully!")
+    elif args.skip_tests and deployment_occurred:
+        print("\nDeployment completed. Integration tests skipped (--skip-tests flag used).")
+    
+    # If no main action was specified, show help
+    if not any([args.diff_confs, args.backup_conf, args.deploy_conf]):
+        print("No action specified. Use --diff-confs, --backup-conf, or --deploy-conf.")
+        parser.print_help()
+
+def error_exit(message):
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+if __name__ == '__main__':
+    main()
