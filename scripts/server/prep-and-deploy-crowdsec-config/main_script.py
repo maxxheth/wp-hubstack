@@ -270,10 +270,15 @@ def main():
         if success:
             logger_setup.logger.info("Tarball injection process completed successfully.")
             print("Tarball injection process completed successfully.")
-            if not args.skip_tests and not args.dry_run:
-                logger_setup.logger.info("Running CrowdSec integration tests after tarball injection...")
-                print("\nRunning CrowdSec integration tests...")
-                run_crowdsec_integration_tests(args.dry_run, args.spreadsheet_id, args.creds_file)
+            if not args.skip_tests and not args.dry_run and args.test_containers:
+                logger_setup.logger.info(f"Running CrowdSec integration tests for containers: {args.test_containers}")
+                print(f"\nRunning CrowdSec integration tests for containers: {args.test_containers}")
+                run_crowdsec_integration_tests(
+                    dry_run=args.dry_run, 
+                    spreadsheet_id=args.spreadsheet_id, 
+                    credentials_file=args.creds_file,
+                    container_names=args.test_containers
+                )
         else:
             logger_setup.logger.error("Tarball injection process failed.")
             print("Tarball injection process failed.")
@@ -305,10 +310,15 @@ def main():
         if success:
             logger_setup.logger.info("Label injection process completed successfully.")
             print("Label injection process completed successfully.")
-            if not args.skip_tests and not args.dry_run:
-                logger_setup.logger.info("Running CrowdSec integration tests after label injection...")
-                print("\nRunning CrowdSec integration tests...")
-                run_crowdsec_integration_tests(args.dry_run, args.spreadsheet_id, args.creds_file)
+            if not args.skip_tests and not args.dry_run and args.test_containers:
+                logger_setup.logger.info(f"Running CrowdSec integration tests for containers: {args.test_containers}")
+                print(f"\nRunning CrowdSec integration tests for containers: {args.test_containers}")
+                run_crowdsec_integration_tests(
+                    dry_run=args.dry_run, 
+                    spreadsheet_id=args.spreadsheet_id, 
+                    credentials_file=args.creds_file,
+                    container_names=args.test_containers
+                )
         else:
             logger_setup.logger.error("Label injection process failed.")
             print("Label injection process failed.")
@@ -336,12 +346,22 @@ def main():
                 args.backup_conf or args.test_only or args.list_tarballs or args.discover_containers):
             sys.exit(0)
 
-    # 5. Test-Only Mode
+    # 5. Test-Only Mode (updated to require container names)
     if args.test_only:
         action_taken = True
-        logger_setup.logger.info("Running CrowdSec integration tests only...")
-        print("Running CrowdSec integration tests only...")
-        test_success = run_crowdsec_integration_tests(args.dry_run, args.spreadsheet_id, args.creds_file)
+        if not args.test_containers:
+            logger_setup.logger.error("--test-only requires --test-containers to specify which containers to test")
+            print("ERROR: --test-only requires --test-containers to specify which containers to test")
+            sys.exit(1)
+            
+        logger_setup.logger.info(f"Running CrowdSec integration tests for containers: {args.test_containers}")
+        print(f"Running CrowdSec integration tests for containers: {args.test_containers}")
+        test_success = run_crowdsec_integration_tests(
+            dry_run=args.dry_run, 
+            spreadsheet_id=args.spreadsheet_id, 
+            credentials_file=args.creds_file,
+            container_names=args.test_containers
+        )
         # sys.exit(0 if test_success else 1) # Exit after test_only
 
     # 6. Configuration Diff
@@ -405,11 +425,15 @@ def main():
         if deployment_succeeded:
             logger_setup.logger.info("Configuration deployment reported success.")
             print("Configuration deployment completed successfully.")
-            if not args.skip_tests and not args.dry_run:
-                logger_setup.logger.info("Running CrowdSec integration tests after deployment...")
-                print("\nRunning CrowdSec integration tests...")
-                # Tests run regardless of their own outcome for now, deployment is key result here.
-                run_crowdsec_integration_tests(args.dry_run, args.spreadsheet_id, args.creds_file)
+            if not args.skip_tests and not args.dry_run and args.test_containers:
+                logger_setup.logger.info(f"Running CrowdSec integration tests for containers: {args.test_containers}")
+                print(f"\nRunning CrowdSec integration tests for containers: {args.test_containers}")
+                run_crowdsec_integration_tests(
+                    dry_run=args.dry_run, 
+                    spreadsheet_id=args.spreadsheet_id, 
+                    credentials_file=args.creds_file,
+                    container_names=args.test_containers
+                )
         else:
             logger_setup.logger.error("Configuration deployment failed.")
             print("Configuration deployment failed.")

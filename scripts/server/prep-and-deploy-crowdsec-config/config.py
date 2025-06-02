@@ -32,8 +32,7 @@ TRAEFIK_SCHEME = "http"  # "http" or "https"
 TRAEFIK_HOST = "localhost"  # Traefik host/domain
 TRAEFIK_PORT = 80  # Traefik port (80 for HTTP, 443 for HTTPS)
 
-# Test service settings
-TEST_SERVICE_HOST_HEADER = "test-service.yourdomain.com"  # Host header for routing
+# Test service settings - now only path, host headers come from container inspection
 TEST_SERVICE_PATH = "/"  # Path to test endpoint
 
 # CrowdSec settings
