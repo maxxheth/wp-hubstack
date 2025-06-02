@@ -4,8 +4,10 @@ Traefik Configuration Diff, Deployment, and CrowdSec Integration Test Tool
 
 This comprehensive script provides:
 1. Configuration diffing and deployment with Google Sheets/Docs integration
-2. Automated backup management
+2. Automated backup management with transactional deployment
 3. CrowdSec + Traefik bouncer integration testing
+4. Error recovery and logging to debug.log and Google Sheets
+5. Integrated CrowdSec helper commands
 
 The CrowdSec testing functionality tests the integration by:
 1. Verifying access to a test service when no ban is active
@@ -31,10 +33,12 @@ import re
 import yaml
 import shutil
 import difflib
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 import requests
 import time
 import urllib3
+import traceback
+import logging
 
 # Disable SSL warnings for self-signed certificates in testing
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -45,6 +49,7 @@ DEFAULT_SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID'  # PLEASE REPLACE
 DEFAULT_TRAEFIK_DIR = '/var/opt/traefik'
 DEFAULT_CURRENT_CONFIG = 'docker-compose.yml'
 DEFAULT_PENDING_CONFIG = 'docker-compose-pending.yml'
+DEFAULT_DEBUG_LOG_FILE = 'debug.log'
 
 # ================================
 # CROWDSEC TEST CONFIGURATION
@@ -61,6 +66,8 @@ TEST_SERVICE_PATH = "/"  # Path to test endpoint
 
 # CrowdSec settings
 CROWDSEC_LAPI_CONTAINER_NAME = "crowdsec"  # CrowdSec LAPI container name
+CROWDSEC_TRAEFIK_BOUNCER_CONTAINER_NAME = "crowdsec-bouncer"  # Traefik bouncer container
+TRAEFIK_CONTAINER_NAME = "traefik"  # Traefik container
 TEST_IP_TO_BAN = "1.2.3.4"  # IP address to ban/unban for testing
 
 # Expected HTTP status codes
@@ -73,6 +80,119 @@ BOUNCER_SYNC_DELAY_SECONDS = 15  # Wait time for bouncer to sync with LAPI
 # HTTP request settings
 REQUEST_TIMEOUT = 10  # Timeout for HTTP requests in seconds
 VERIFY_SSL = False  # Set to True for production HTTPS with valid certs
+
+# ================================
+# LOGGING SETUP
+# ================================
+
+def setup_logging(debug_log_file: str = DEFAULT_DEBUG_LOG_FILE):
+    """Set up logging configuration."""
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(debug_log_file),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    return logging.getLogger(__name__)
+
+logger = setup_logging()
+
+# ================================
+# ERROR HANDLING AND RECOVERY
+# ================================
+
+class DeploymentError(Exception):
+    """Custom exception for deployment-related errors."""
+    pass
+
+class TransactionManager:
+    """Manages transactional deployments with rollback capability."""
+    
+    def __init__(self, original_config_path: str, backup_path: str = ""):
+        self.original_config_path = original_config_path
+        self.backup_path = backup_path
+        self.deployment_started = False
+        self.rollback_performed = False
+    
+    def start_deployment(self):
+        """Mark the start of deployment transaction."""
+        self.deployment_started = True
+        logger.info(f"Starting deployment transaction for {self.original_config_path}")
+    
+    def rollback(self):
+        """Rollback to the backup configuration."""
+        if not self.backup_path or not os.path.exists(self.backup_path):
+            logger.error("Cannot rollback: backup file not available")
+            return False
+        
+        try:
+            shutil.copy2(self.backup_path, self.original_config_path)
+            self.rollback_performed = True
+            logger.info(f"Rollback successful: restored {self.original_config_path} from {self.backup_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Rollback failed: {e}")
+            return False
+    
+    def cleanup(self):
+        """Clean up temporary files if rollback was not needed."""
+        if not self.rollback_performed and self.backup_path and os.path.exists(self.backup_path):
+            # Keep backup for safety, but log its location
+            logger.info(f"Deployment successful. Backup retained at: {self.backup_path}")
+
+def log_error_to_google_sheets(spreadsheet_id: str, credentials_file: str, error_message: str, dry_run: bool = False):
+    """Log error to Google Sheets Debug Log worksheet."""
+    if dry_run:
+        logger.info(f"[DRY RUN] Would log error to Google Sheets: {error_message}")
+        return
+    
+    try:
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds = ServiceAccountCredentials.from_json_keyfile_name(credentials_file, scope)
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_key(spreadsheet_id)
+        
+        # Get or create Debug Log worksheet
+        debug_sheet_name = "Debug Log"
+        try:
+            sheet = spreadsheet.worksheet(debug_sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            logger.info(f"Creating '{debug_sheet_name}' worksheet...")
+            sheet = spreadsheet.add_worksheet(title=debug_sheet_name, rows="1000", cols=2)
+            # Add headers
+            sheet.update('A1', [["Date of Incident", "Incident"]], value_input_option='USER_ENTERED')
+        
+        # Add error entry
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        new_row = [timestamp, error_message]
+        sheet.append_row(new_row, value_input_option='USER_ENTERED')
+        logger.info(f"Error logged to Google Sheets Debug Log")
+        
+    except Exception as e:
+        logger.error(f"Failed to log error to Google Sheets: {e}")
+
+def handle_deployment_error(error: Exception, transaction_manager: TransactionManager, 
+                          spreadsheet_id: str = "", credentials_file: str = "", dry_run: bool = False):
+    """Handle deployment errors with rollback and logging."""
+    error_message = f"Deployment Error: {str(error)}\nTraceback: {traceback.format_exc()}"
+    
+    # Log to debug.log
+    logger.error(error_message)
+    
+    # Log to Google Sheets if configured
+    if spreadsheet_id and credentials_file and os.path.exists(credentials_file):
+        log_error_to_google_sheets(spreadsheet_id, credentials_file, error_message, dry_run)
+    
+    # Perform rollback
+    if transaction_manager.deployment_started:
+        logger.info("Attempting rollback due to deployment error...")
+        rollback_success = transaction_manager.rollback()
+        if rollback_success:
+            logger.info("Rollback completed successfully")
+        else:
+            logger.error("Rollback failed - manual intervention required")
 
 # ================================
 # UTILITY FUNCTIONS
@@ -108,13 +228,13 @@ def load_yaml_file(file_path: str) -> Dict[Any, Any]:
         with open(file_path, 'r', encoding='utf-8') as file:
             return yaml.safe_load(file) or {}
     except FileNotFoundError:
-        print(f"Error: YAML file '{file_path}' not found.")
+        logger.error(f"YAML file '{file_path}' not found.")
         return {}
     except yaml.YAMLError as e:
-        print(f"Error parsing YAML file '{file_path}': {e}")
+        logger.error(f"Error parsing YAML file '{file_path}': {e}")
         return {}
     except Exception as e:
-        print(f"Unexpected error loading YAML file '{file_path}': {e}")
+        logger.error(f"Unexpected error loading YAML file '{file_path}': {e}")
         return {}
 
 def save_yaml_file(data: Dict[Any, Any], file_path: str) -> bool:
@@ -124,8 +244,168 @@ def save_yaml_file(data: Dict[Any, Any], file_path: str) -> bool:
             yaml.dump(data, file, default_flow_style=False, indent=2)
         return True
     except Exception as e:
-        print(f"Error saving YAML file '{file_path}': {e}")
+        logger.error(f"Error saving YAML file '{file_path}': {e}")
         return False
+
+# ================================
+# CROWDSEC HELPER FUNCTIONS
+# ================================
+
+def run_docker_command(container_name: str, command: List[str], timeout: int = 30) -> Tuple[bool, str, str]:
+    """
+    Execute a command in a Docker container.
+    
+    Returns:
+        Tuple of (success, stdout, stderr)
+    """
+    cmd = ["docker", "exec", container_name] + command
+    logger.debug(f"Executing Docker command: {' '.join(cmd)}")
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        
+        success = result.returncode == 0
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        
+        if stdout:
+            logger.debug(f"STDOUT: {stdout}")
+        if stderr:
+            logger.debug(f"STDERR: {stderr}")
+        
+        logger.debug(f"Command {'SUCCEEDED' if success else 'FAILED'} (exit code: {result.returncode})")
+        
+        return success, stdout, stderr
+        
+    except subprocess.TimeoutExpired:
+        logger.error("Docker command timed out")
+        return False, "", "Command timed out"
+    except Exception as e:
+        logger.error(f"Exception executing Docker command: {e}")
+        return False, "", str(e)
+
+def run_cscli_command(command_args: List[str]) -> bool:
+    """Execute a cscli command via docker exec."""
+    cmd = ["cscli"] + command_args
+    success, stdout, stderr = run_docker_command(CROWDSEC_LAPI_CONTAINER_NAME, cmd)
+    
+    if stdout:
+        print(f"STDOUT: {stdout}")
+    if stderr:
+        print(f"STDERR: {stderr}")
+    
+    return success
+
+# CrowdSec Decision Management
+def cs_decisions_list(extra_args: List[str] = None) -> bool:
+    """List CrowdSec decisions."""
+    args = ["decisions", "list"]
+    if extra_args:
+        args.extend(extra_args)
+    return run_cscli_command(args)
+
+def cs_decisions_list_ip(ip_address: str) -> bool:
+    """List decisions for a specific IP."""
+    return run_cscli_command(["decisions", "list", "--ip", ip_address])
+
+def cs_ban_ip(ip_address: str, reason: str, duration: str) -> bool:
+    """Ban an IP address."""
+    return run_cscli_command([
+        "decisions", "add",
+        "--ip", ip_address,
+        "--reason", reason,
+        "--duration", duration
+    ])
+
+def cs_unban_ip(ip_address: str) -> bool:
+    """Unban an IP address."""
+    return run_cscli_command(["decisions", "delete", "--ip", ip_address])
+
+def cs_unban_id(decision_id: str) -> bool:
+    """Unban by decision ID."""
+    return run_cscli_command(["decisions", "delete", "--id", decision_id])
+
+# CrowdSec Collections Management
+def cs_collections_list() -> bool:
+    """List CrowdSec collections."""
+    return run_cscli_command(["collections", "list"])
+
+def cs_collections_install(collection_name: str) -> bool:
+    """Install a CrowdSec collection."""
+    return run_cscli_command(["collections", "install", collection_name])
+
+# CrowdSec Hub Management
+def cs_hub_update() -> bool:
+    """Update CrowdSec hub."""
+    return run_cscli_command(["hub", "update"])
+
+def cs_hub_upgrade(collection_name: str = "") -> bool:
+    """Upgrade CrowdSec collections."""
+    args = ["hub", "upgrade"]
+    if collection_name:
+        args.append(collection_name)
+    return run_cscli_command(args)
+
+# CrowdSec Status Checks
+def cs_capi_status() -> bool:
+    """Check CrowdSec CAPI status."""
+    return run_cscli_command(["capi", "status"])
+
+def cs_bouncers_list() -> bool:
+    """List registered bouncers."""
+    return run_cscli_command(["bouncers", "list"])
+
+def cs_bouncer_add(bouncer_name: str) -> bool:
+    """Add a new bouncer and generate API key."""
+    return run_cscli_command(["bouncers", "add", bouncer_name])
+
+def cs_bouncer_delete(bouncer_name: str) -> bool:
+    """Delete a bouncer."""
+    return run_cscli_command(["bouncers", "delete", bouncer_name])
+
+# Docker Container Management
+def restart_container(container_name: str) -> bool:
+    """Restart a Docker container."""
+    try:
+        result = subprocess.run(
+            ["docker", "restart", container_name],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        success = result.returncode == 0
+        if success:
+            logger.info(f"Container '{container_name}' restarted successfully")
+        else:
+            logger.error(f"Failed to restart container '{container_name}': {result.stderr}")
+        return success
+    except Exception as e:
+        logger.error(f"Exception restarting container '{container_name}': {e}")
+        return False
+
+def test_bouncer_connectivity() -> bool:
+    """Test connectivity between Traefik and CrowdSec bouncer."""
+    logger.info("Testing bouncer connectivity from Traefik container...")
+    
+    # Try curl first, then wget
+    for tool in ["curl", "wget"]:
+        if tool == "curl":
+            cmd = ["curl", "-I", "--connect-timeout", "5", "http://bouncer-traefik:8080/api/v1/forwardAuth"]
+        else:
+            cmd = ["wget", "--spider", "-S", "http://bouncer-traefik:8080/api/v1/forwardAuth"]
+        
+        success, stdout, stderr = run_docker_command(TRAEFIK_CONTAINER_NAME, cmd, timeout=10)
+        if success:
+            logger.info(f"Bouncer connectivity test passed using {tool}")
+            return True
+    
+    logger.error("Bouncer connectivity test failed - no working HTTP client found in Traefik container")
+    return False
 
 # ================================
 # DIFF AND DEPLOYMENT FUNCTIONS
@@ -172,13 +452,13 @@ def deep_diff_yaml(current: Dict[Any, Any], pending: Dict[Any, Any], path: str =
 
 def create_diff_yaml(current_file: str, pending_file: str, output_file: str = "diff-conf.yml") -> Dict[str, Any]:
     """Create a diff YAML file comparing current and pending configurations."""
-    print(f"Creating diff between '{current_file}' and '{pending_file}'...")
+    logger.info(f"Creating diff between '{current_file}' and '{pending_file}'...")
     
     current_config = load_yaml_file(current_file)
     pending_config = load_yaml_file(pending_file)
     
     if not current_config and not pending_config:
-        print("Error: Both configuration files are empty or invalid.")
+        logger.error("Both configuration files are empty or invalid.")
         return {}
     
     diff_data = deep_diff_yaml(current_config, pending_config)
@@ -195,90 +475,98 @@ def create_diff_yaml(current_file: str, pending_file: str, output_file: str = "d
     }
     
     if save_yaml_file(diff_with_metadata, output_file):
-        print(f"Diff saved to '{output_file}'")
+        logger.info(f"Diff saved to '{output_file}'")
         return diff_with_metadata
     else:
-        print(f"Failed to save diff to '{output_file}'")
+        logger.error(f"Failed to save diff to '{output_file}'")
         return {}
 
 def backup_config(config_path: str, dry_run: bool = False) -> str:
     """Create a timestamped backup of the configuration file."""
     if not os.path.exists(config_path):
-        print(f"Error: Configuration file '{config_path}' does not exist.")
+        logger.error(f"Configuration file '{config_path}' does not exist.")
         return ""
     
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = f"{config_path}.backup_{timestamp}"
     
     if dry_run:
-        print(f"[DRY RUN] Would create backup: {config_path} -> {backup_path}")
+        logger.info(f"[DRY RUN] Would create backup: {config_path} -> {backup_path}")
         return backup_path
     
     try:
         shutil.copy2(config_path, backup_path)
-        print(f"Backup created: {backup_path}")
+        logger.info(f"Backup created: {backup_path}")
         return backup_path
     except Exception as e:
-        print(f"Error creating backup: {e}")
+        logger.error(f"Error creating backup: {e}")
         return ""
 
-def deploy_config(diff_file: str, old_config: str, new_config: str, skip_backup: bool = False, dry_run: bool = False) -> bool:
-    """Deploy configuration using diff file to guide the process."""
-    if not os.path.exists(diff_file):
-        print(f"Error: Diff file '{diff_file}' not found.")
-        return False
-    
-    if not os.path.exists(new_config):
-        print(f"Error: New configuration file '{new_config}' not found.")
-        return False
-    
-    if dry_run:
-        print(f"[DRY RUN] Would deploy config from '{new_config}' to '{old_config}'")
-        print(f"[DRY RUN] Using diff file '{diff_file}' for validation")
-        if not skip_backup:
-            print(f"[DRY RUN] Would create backup of '{old_config}' before deployment")
-        else:
-            print(f"[DRY RUN] Backup skipped (--skip-backup flag)")
-        return True
+def deploy_config(diff_file: str, old_config: str, new_config: str, skip_backup: bool = False, 
+                 dry_run: bool = False, spreadsheet_id: str = "", credentials_file: str = "") -> bool:
+    """Deploy configuration with transactional rollback capability."""
+    transaction_manager = None
     
     try:
+        if not os.path.exists(diff_file):
+            raise DeploymentError(f"Diff file '{diff_file}' not found.")
+        
+        if not os.path.exists(new_config):
+            raise DeploymentError(f"New configuration file '{new_config}' not found.")
+        
+        if dry_run:
+            logger.info(f"[DRY RUN] Would deploy config from '{new_config}' to '{old_config}'")
+            logger.info(f"[DRY RUN] Using diff file '{diff_file}' for validation")
+            if not skip_backup:
+                logger.info(f"[DRY RUN] Would create backup of '{old_config}' before deployment")
+            else:
+                logger.info(f"[DRY RUN] Backup skipped (--skip-backup flag)")
+            return True
+        
         # Load diff file to understand changes
         diff_data = load_yaml_file(diff_file)
         if not diff_data:
-            print("Error: Could not load diff file or file is empty.")
-            return False
+            raise DeploymentError("Could not load diff file or file is empty.")
         
-        print("Diff analysis:")
+        logger.info("Diff analysis:")
         diff_info = diff_data.get('diff', {})
-        print(f"  - Added: {len(diff_info.get('added', {}))}")
-        print(f"  - Removed: {len(diff_info.get('removed', {}))}")
-        print(f"  - Modified: {len(diff_info.get('modified', {}))}")
+        logger.info(f"  - Added: {len(diff_info.get('added', {}))}")
+        logger.info(f"  - Removed: {len(diff_info.get('removed', {}))}")
+        logger.info(f"  - Modified: {len(diff_info.get('modified', {}))}")
         
         # Create backup before deployment (unless skipped)
         backup_path = ""
         if not skip_backup:
-            print(f"\n--- CREATING BACKUP ---")
+            logger.info("Creating backup...")
             backup_path = backup_config(old_config)
             if not backup_path:
-                print("Failed to create backup. Aborting deployment.")
-                print("Use --skip-backup flag to deploy without backup (not recommended).")
-                return False
+                raise DeploymentError("Failed to create backup.")
         else:
-            print(f"\n--- BACKUP SKIPPED ---")
-            print("Warning: Deploying without backup (--skip-backup flag specified)")
+            logger.warning("Backup skipped - deploying without backup (--skip-backup flag specified)")
+        
+        # Initialize transaction manager
+        transaction_manager = TransactionManager(old_config, backup_path)
+        transaction_manager.start_deployment()
         
         # Deploy new configuration
-        print(f"\n--- DEPLOYING CONFIGURATION ---")
+        logger.info("Deploying configuration...")
         shutil.copy2(new_config, old_config)
-        print(f"Configuration deployed successfully from '{new_config}' to '{old_config}'")
+        logger.info(f"Configuration deployed successfully from '{new_config}' to '{old_config}'")
         
         if backup_path:
-            print(f"Original configuration backed up to: {backup_path}")
+            logger.info(f"Original configuration backed up to: {backup_path}")
         
+        # Clean up transaction
+        transaction_manager.cleanup()
         return True
         
     except Exception as e:
-        print(f"Error during deployment: {e}")
+        if transaction_manager:
+            handle_deployment_error(e, transaction_manager, spreadsheet_id, credentials_file, dry_run)
+        else:
+            logger.error(f"Deployment error (no transaction manager): {e}")
+            if spreadsheet_id and credentials_file:
+                log_error_to_google_sheets(spreadsheet_id, credentials_file, str(e), dry_run)
         return False
 
 # ================================
@@ -321,11 +609,11 @@ def create_google_doc(credentials_file: str, title: str, content: str) -> str:
         ).execute()
         
         doc_url = f"https://docs.google.com/document/d/{doc_id}"
-        print(f"Created Google Doc: {doc_url}")
+        logger.info(f"Created Google Doc: {doc_url}")
         return doc_url
         
     except Exception as e:
-        print(f"Error creating Google Doc: {e}")
+        logger.error(f"Error creating Google Doc: {e}")
         return ""
 
 def format_diff_content(current_file: str, pending_file: str) -> str:
@@ -370,8 +658,8 @@ def update_google_sheet_with_diff(spreadsheet_id: str, sheet_name: str, credenti
                                 doc_url: str, hostname: str, dry_run: bool = False) -> bool:
     """Update Google Sheet with diff information."""
     if dry_run:
-        print(f"[DRY RUN] Would update Google Sheet '{sheet_name}' with diff information")
-        print(f"[DRY RUN] Document URL: {doc_url}")
+        logger.info(f"[DRY RUN] Would update Google Sheet '{sheet_name}' with diff information")
+        logger.info(f"[DRY RUN] Document URL: {doc_url}")
         return True
     
     try:
@@ -383,9 +671,9 @@ def update_google_sheet_with_diff(spreadsheet_id: str, sheet_name: str, credenti
         try:
             sheet = spreadsheet.worksheet(sheet_name)
         except gspread.exceptions.WorksheetNotFound:
-            print(f"Worksheet '{sheet_name}' not found. Creating it...")
+            logger.info(f"Worksheet '{sheet_name}' not found. Creating it...")
             sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols=3)
-            print(f"Worksheet '{sheet_name}' created.")
+            logger.info(f"Worksheet '{sheet_name}' created.")
         
         # Check if header exists
         header = ["Date of Diff", "Hostname", "Diff"]
@@ -398,58 +686,16 @@ def update_google_sheet_with_diff(spreadsheet_id: str, sheet_name: str, credenti
         new_row = [timestamp, hostname, doc_url]
         sheet.append_row(new_row, value_input_option='USER_ENTERED')
         
-        print(f"Google Sheet '{sheet_name}' updated successfully.")
+        logger.info(f"Google Sheet '{sheet_name}' updated successfully.")
         return True
         
     except Exception as e:
-        print(f"Error updating Google Sheet: {e}")
+        logger.error(f"Error updating Google Sheet: {e}")
         return False
 
 # ================================
 # CROWDSEC TESTING FUNCTIONS
 # ================================
-
-def run_cscli_command(command_args):
-    """
-    Execute a cscli command via docker exec.
-    
-    Args:
-        command_args (list): List of arguments for cscli command
-        
-    Returns:
-        bool: True on success (exit code 0), False otherwise
-    """
-    cmd = ["docker", "exec", CROWDSEC_LAPI_CONTAINER_NAME, "cscli"] + command_args
-    
-    print(f"Executing: {' '.join(cmd)}")
-    
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        
-        # Print stdout if available
-        if result.stdout.strip():
-            print(f"STDOUT: {result.stdout.strip()}")
-        
-        # Print stderr if available
-        if result.stderr.strip():
-            print(f"STDERR: {result.stderr.strip()}")
-        
-        success = result.returncode == 0
-        print(f"Command {'SUCCEEDED' if success else 'FAILED'} (exit code: {result.returncode})")
-        
-        return success
-        
-    except subprocess.TimeoutExpired:
-        print("ERROR: Command timed out")
-        return False
-    except Exception as e:
-        print(f"ERROR: Exception executing command: {e}")
-        return False
 
 def ban_ip(ip_address, reason="Automated Test Ban", duration="5m"):
     """
@@ -463,14 +709,8 @@ def ban_ip(ip_address, reason="Automated Test Ban", duration="5m"):
     Returns:
         bool: True if ban was successful, False otherwise
     """
-    print(f"\n--- Banning IP: {ip_address} ---")
-    command_args = [
-        "decisions", "add",
-        "--ip", ip_address,
-        "--reason", reason,
-        "--duration", duration
-    ]
-    return run_cscli_command(command_args)
+    logger.info(f"Banning IP: {ip_address}")
+    return cs_ban_ip(ip_address, reason, duration)
 
 def unban_ip(ip_address):
     """
@@ -482,13 +722,8 @@ def unban_ip(ip_address):
     Returns:
         bool: True if unban was successful or no decision existed, False on error
     """
-    print(f"\n--- Unbanning IP: {ip_address} ---")
-    command_args = [
-        "decisions", "delete",
-        "--ip", ip_address
-    ]
-    # Note: This may "fail" if no decision exists, but that's okay for cleanup
-    return run_cscli_command(command_args)
+    logger.info(f"Unbanning IP: {ip_address}")
+    return cs_unban_ip(ip_address)
 
 def check_service_access():
     """
@@ -503,8 +738,8 @@ def check_service_access():
         "User-Agent": "TraefikCrowdSecTester/1.0"
     }
     
-    print(f"Making request to: {url}")
-    print(f"Headers: {headers}")
+    logger.info(f"Making request to: {url}")
+    logger.debug(f"Headers: {headers}")
     
     try:
         response = requests.get(
@@ -516,37 +751,43 @@ def check_service_access():
         )
         
         status_code = response.status_code
-        print(f"Response status: {status_code}")
+        logger.info(f"Response status: {status_code}")
         
-        # Print response headers for debugging
-        print("Response headers:")
+        # Log response headers for debugging
+        logger.debug("Response headers:")
         for key, value in response.headers.items():
-            print(f"  {key}: {value}")
+            logger.debug(f"  {key}: {value}")
         
         return status_code
         
     except requests.exceptions.RequestException as e:
-        print(f"ERROR: Request failed: {e}")
+        logger.error(f"Request failed: {e}")
         return -1
 
 def print_test_result(test_name, expected, actual, test_number):
     """Print formatted test result."""
     passed = expected == actual
     status = "PASSED" if passed else "FAILED"
+    result_msg = f"\nTest {test_number}: {test_name}\nExpected status: {expected}\nActual status: {actual}\nResult: {status}"
+    
     print(f"\n{'='*50}")
     print(f"Test {test_number}: {test_name}")
     print(f"Expected status: {expected}")
     print(f"Actual status: {actual}")
     print(f"Result: {status}")
     print(f"{'='*50}")
+    
+    logger.info(result_msg)
     return passed
 
-def run_crowdsec_integration_tests(dry_run: bool = False) -> bool:
-    """Run the complete CrowdSec integration test suite."""
+def run_crowdsec_integration_tests(dry_run: bool = False, spreadsheet_id: str = "", 
+                                  credentials_file: str = "") -> bool:
+    """Run the complete CrowdSec integration test suite with error handling."""
     if dry_run:
-        print(f"[DRY RUN] Would run CrowdSec integration tests")
+        logger.info("[DRY RUN] Would run CrowdSec integration tests")
         return True
     
+    logger.info("Starting CrowdSec integration tests")
     print(f"\n{'='*60}")
     print("RUNNING CROWDSEC INTEGRATION TESTS")
     print(f"{'='*60}")
@@ -563,47 +804,66 @@ def run_crowdsec_integration_tests(dry_run: bool = False) -> bool:
     
     try:
         # Initial cleanup - ensure test IP is not banned
+        logger.info("Performing initial cleanup")
         print("\n--- INITIAL CLEANUP ---")
         unban_result = unban_ip(TEST_IP_TO_BAN)
-        print(f"Initial cleanup result: {'SUCCESS' if unban_result else 'FAILED (may be normal if no existing ban)'}")
+        cleanup_msg = f"Initial cleanup result: {'SUCCESS' if unban_result else 'FAILED (may be normal if no existing ban)'}"
+        print(cleanup_msg)
+        logger.info(cleanup_msg)
         
         # Wait for sync after cleanup
+        logger.info(f"Waiting {BOUNCER_SYNC_DELAY_SECONDS} seconds for bouncer sync...")
         print(f"\nWaiting {BOUNCER_SYNC_DELAY_SECONDS} seconds for bouncer sync...")
         time.sleep(BOUNCER_SYNC_DELAY_SECONDS)
         
         # Test 1: Access should be allowed (no ban active)
+        logger.info("Starting Test 1: Access should be allowed")
         print("\n--- TEST 1: ACCESS SHOULD BE ALLOWED ---")
         status_1 = check_service_access()
         test_1_passed = print_test_result("Access Allowed", EXPECTED_STATUS_ALLOWED, status_1, 1)
         test_results.append(("Test 1: Access Allowed", test_1_passed))
         
         # Action: Ban the test IP
+        logger.info("Banning test IP")
         print("\n--- ACTION: BANNING TEST IP ---")
         ban_result = ban_ip(TEST_IP_TO_BAN)
         
         if not ban_result:
-            print("ERROR: Failed to ban IP. Aborting blocking tests.")
+            error_msg = "Failed to ban IP. Aborting blocking tests."
+            logger.error(error_msg)
+            print(f"ERROR: {error_msg}")
             test_results.append(("Test 2: Access Blocked", False))
             test_results.append(("Test 3: Access Restored", False))
+            
+            if spreadsheet_id and credentials_file:
+                log_error_to_google_sheets(spreadsheet_id, credentials_file, error_msg, dry_run)
         else:
-            print(f"IP ban successful. Waiting {BOUNCER_SYNC_DELAY_SECONDS} seconds for bouncer sync...")
+            sync_msg = f"IP ban successful. Waiting {BOUNCER_SYNC_DELAY_SECONDS} seconds for bouncer sync..."
+            logger.info(sync_msg)
+            print(sync_msg)
             time.sleep(BOUNCER_SYNC_DELAY_SECONDS)
             
             # Test 2: Access should be blocked (ban active)
+            logger.info("Starting Test 2: Access should be blocked")
             print("\n--- TEST 2: ACCESS SHOULD BE BLOCKED ---")
             status_2 = check_service_access()
             test_2_passed = print_test_result("Access Blocked", EXPECTED_STATUS_BLOCKED, status_2, 2)
             test_results.append(("Test 2: Access Blocked", test_2_passed))
             
             # Action: Unban the test IP (cleanup)
+            logger.info("Unbanning test IP")
             print("\n--- ACTION: UNBANNING TEST IP ---")
             unban_result = unban_ip(TEST_IP_TO_BAN)
-            print(f"Unban result: {'SUCCESS' if unban_result else 'FAILED'}")
+            unban_msg = f"Unban result: {'SUCCESS' if unban_result else 'FAILED'}"
+            logger.info(unban_msg)
+            print(unban_msg)
             
+            logger.info(f"Waiting {BOUNCER_SYNC_DELAY_SECONDS} seconds for bouncer sync...")
             print(f"Waiting {BOUNCER_SYNC_DELAY_SECONDS} seconds for bouncer sync...")
             time.sleep(BOUNCER_SYNC_DELAY_SECONDS)
             
             # Test 3: Access should be restored (no ban active)
+            logger.info("Starting Test 3: Access should be restored")
             print("\n--- TEST 3: ACCESS SHOULD BE RESTORED ---")
             status_3 = check_service_access()
             test_3_passed = print_test_result("Access Restored", EXPECTED_STATUS_ALLOWED, status_3, 3)
@@ -626,17 +886,26 @@ def run_crowdsec_integration_tests(dry_run: bool = False) -> bool:
         print(f"Overall Result: {overall_status}")
         print("=" * 60)
         
+        logger.info(f"CrowdSec integration tests completed: {overall_status}")
         return all_passed
         
     except KeyboardInterrupt:
-        print("\n\nTest interrupted by user.")
+        interrupt_msg = "Test interrupted by user."
+        logger.warning(interrupt_msg)
+        print(f"\n\n{interrupt_msg}")
         print("Attempting cleanup...")
         unban_ip(TEST_IP_TO_BAN)
         return False
     except Exception as e:
-        print(f"\nUnexpected error during tests: {e}")
+        error_msg = f"Unexpected error during tests: {e}"
+        logger.error(error_msg)
+        print(f"\n{error_msg}")
         print("Attempting cleanup...")
         unban_ip(TEST_IP_TO_BAN)
+        
+        if spreadsheet_id and credentials_file:
+            log_error_to_google_sheets(spreadsheet_id, credentials_file, error_msg, dry_run)
+        
         return False
 
 # ================================
@@ -645,7 +914,7 @@ def run_crowdsec_integration_tests(dry_run: bool = False) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Traefik Configuration Diff, Deployment, and CrowdSec Integration Test Tool with Google Sheets/Docs integration.",
+        description="Traefik Configuration Diff, Deployment, and CrowdSec Integration Test Tool with Google Sheets/Docs integration and transactional deployment.",
         formatter_class=argparse.RawTextHelpFormatter
     )
     
@@ -662,6 +931,26 @@ def main():
     parser.add_argument('--test-only', action='store_true',
                        help="Run only CrowdSec integration tests (no deployment)")
     
+    # CrowdSec helper commands
+    parser.add_argument('--cs-decisions-list', action='store_true',
+                       help="List CrowdSec decisions")
+    parser.add_argument('--cs-decisions-list-ip', metavar='IP',
+                       help="List decisions for specific IP")
+    parser.add_argument('--cs-ban-ip', metavar='IP:REASON:DURATION',
+                       help="Ban IP (format: 'ip:reason:duration')")
+    parser.add_argument('--cs-unban-ip', metavar='IP',
+                       help="Unban IP address")
+    parser.add_argument('--cs-bouncers-list', action='store_true',
+                       help="List registered bouncers")
+    parser.add_argument('--cs-hub-update', action='store_true',
+                       help="Update CrowdSec hub")
+    parser.add_argument('--cs-test-connectivity', action='store_true',
+                       help="Test connectivity between Traefik and bouncer")
+    parser.add_argument('--cs-restart-lapi', action='store_true',
+                       help="Restart CrowdSec LAPI container")
+    parser.add_argument('--cs-restart-bouncer', action='store_true',
+                       help="Restart CrowdSec Traefik bouncer container")
+    
     # Google integration args
     parser.add_argument('--creds-file', default=DEFAULT_GOOGLE_CREDENTIALS_FILE, 
                        help=f"Path to Google service account JSON key. Default: {DEFAULT_GOOGLE_CREDENTIALS_FILE}")
@@ -670,29 +959,82 @@ def main():
     parser.add_argument('--sheet-name', default=DEFAULT_SHEET_NAME, 
                        help=f"Worksheet name. Default: '{DEFAULT_SHEET_NAME}'")
     
+    # Logging args
+    parser.add_argument('--debug-log', default=DEFAULT_DEBUG_LOG_FILE,
+                       help=f"Debug log file path. Default: {DEFAULT_DEBUG_LOG_FILE}")
+    
     # Action args
     parser.add_argument('--dry-run', action='store_true', help="Simulate execution without making changes.")
     
     args = parser.parse_args()
     
+    # Set up logging with custom debug log file
+    global logger
+    logger = setup_logging(args.debug_log)
+    
     # Sanitize sheet name
     args.sheet_name = sanitize_sheet_name(args.sheet_name)
     if not args.sheet_name.strip() or len(args.sheet_name) > 99:
-        print(f"Warning: Invalid sheet name. Using default: {DEFAULT_SHEET_NAME}")
+        logger.warning(f"Invalid sheet name. Using default: {DEFAULT_SHEET_NAME}")
         args.sheet_name = DEFAULT_SHEET_NAME
     
     hostname = socket.gethostname()
     
     if args.dry_run:
+        logger.info("DRY RUN MODE ENABLED - NO ACTUAL CHANGES WILL BE MADE")
         print("*** DRY RUN MODE ENABLED - NO ACTUAL CHANGES WILL BE MADE ***")
     
     if args.skip_backup:
+        logger.warning("BACKUP DISABLED - ORIGINAL CONFIG WILL NOT BE BACKED UP")
         print("*** WARNING: BACKUP DISABLED - ORIGINAL CONFIG WILL NOT BE BACKED UP ***")
+    
+    # Handle CrowdSec helper commands
+    if args.cs_decisions_list:
+        cs_decisions_list()
+        return
+    
+    if args.cs_decisions_list_ip:
+        cs_decisions_list_ip(args.cs_decisions_list_ip)
+        return
+    
+    if args.cs_ban_ip:
+        try:
+            ip, reason, duration = args.cs_ban_ip.split(':', 2)
+            cs_ban_ip(ip, reason, duration)
+        except ValueError:
+            logger.error("--cs-ban-ip requires format 'ip:reason:duration'")
+            sys.exit(1)
+        return
+    
+    if args.cs_unban_ip:
+        cs_unban_ip(args.cs_unban_ip)
+        return
+    
+    if args.cs_bouncers_list:
+        cs_bouncers_list()
+        return
+    
+    if args.cs_hub_update:
+        cs_hub_update()
+        return
+    
+    if args.cs_test_connectivity:
+        test_bouncer_connectivity()
+        return
+    
+    if args.cs_restart_lapi:
+        restart_container(CROWDSEC_LAPI_CONTAINER_NAME)
+        return
+    
+    if args.cs_restart_bouncer:
+        restart_container(CROWDSEC_TRAEFIK_BOUNCER_CONTAINER_NAME)
+        return
     
     # Handle test-only mode
     if args.test_only:
+        logger.info("Running CrowdSec integration tests only...")
         print("Running CrowdSec integration tests only...")
-        test_success = run_crowdsec_integration_tests(args.dry_run)
+        test_success = run_crowdsec_integration_tests(args.dry_run, args.spreadsheet_id, args.creds_file)
         sys.exit(0 if test_success else 1)
     
     # Track if any deployment occurred
@@ -701,6 +1043,7 @@ def main():
     # Handle diff-confs
     if args.diff_confs:
         if '|' not in args.diff_confs:
+            logger.error("--diff-confs requires format 'current_config|pending_config'")
             print("Error: --diff-confs requires format 'current_config|pending_config'")
             sys.exit(1)
         
@@ -708,17 +1051,20 @@ def main():
         current_config = current_config.strip()
         pending_config = pending_config.strip()
         
+        logger.info(f"Comparing configurations: '{current_config}' vs '{pending_config}'")
         print(f"Comparing configurations: '{current_config}' vs '{pending_config}'")
         
         # Create diff
         diff_data = create_diff_yaml(current_config, pending_config)
         if not diff_data:
+            logger.error("Failed to create diff.")
             print("Error: Failed to create diff.")
             sys.exit(1)
         
         # Create Google Doc with diff content
         if not args.dry_run:
             if args.creds_file == DEFAULT_GOOGLE_CREDENTIALS_FILE or args.spreadsheet_id == DEFAULT_SPREADSHEET_ID:
+                logger.warning("Using default placeholder values for Google integration.")
                 print("Warning: Using default placeholder values for Google integration.")
             
             if os.path.exists(args.creds_file):
@@ -733,10 +1079,13 @@ def main():
                         doc_url, hostname, args.dry_run
                     )
                 else:
+                    logger.error("Failed to create Google Doc.")
                     print("Failed to create Google Doc.")
             else:
+                logger.warning(f"Google credentials file '{args.creds_file}' not found. Skipping Google integration.")
                 print(f"Google credentials file '{args.creds_file}' not found. Skipping Google integration.")
         else:
+            logger.info("[DRY RUN] Would create Google Doc and update spreadsheet")
             print("[DRY RUN] Would create Google Doc and update spreadsheet")
     
     # Handle backup-conf
@@ -746,6 +1095,7 @@ def main():
     # Handle deploy-conf
     if args.deploy_conf:
         if '|' not in args.deploy_conf:
+            logger.error("--deploy-conf requires format 'old_config|new_config'")
             print("Error: --deploy-conf requires format 'old_config|new_config'")
             sys.exit(1)
         
@@ -756,41 +1106,54 @@ def main():
         # Check if diff file exists, create if not
         diff_file = "diff-conf.yml"
         if not os.path.exists(diff_file):
+            logger.info(f"Diff file '{diff_file}' not found. Creating it...")
             print(f"Diff file '{diff_file}' not found. Creating it...")
             diff_data = create_diff_yaml(old_config, new_config, diff_file)
             if not diff_data:
+                logger.error("Failed to create diff file for deployment.")
                 print("Error: Failed to create diff file for deployment.")
                 sys.exit(1)
         
-        # Deploy configuration with backup handling
-        if deploy_config(diff_file, old_config, new_config, args.skip_backup, args.dry_run):
+        # Deploy configuration with transactional rollback
+        if deploy_config(diff_file, old_config, new_config, args.skip_backup, args.dry_run, 
+                        args.spreadsheet_id, args.creds_file):
+            logger.info("Configuration deployment completed successfully.")
             print("Configuration deployment completed successfully.")
             deployment_occurred = True
         else:
+            logger.error("Configuration deployment failed.")
             print("Configuration deployment failed.")
             sys.exit(1)
     
     # Run integration tests if deployment occurred and tests are not skipped
     if deployment_occurred and not args.skip_tests:
+        logger.info("Deployment completed. Running integration tests...")
         print(f"\nDeployment completed. Running integration tests...")
         
-        test_success = run_crowdsec_integration_tests(args.dry_run)
+        test_success = run_crowdsec_integration_tests(args.dry_run, args.spreadsheet_id, args.creds_file)
         
         if not test_success:
+            logger.warning("Integration tests failed after deployment!")
             print("\nWARNING: Integration tests failed after deployment!")
             print("Please review the test output and verify your configuration.")
             # Don't exit with error code as deployment was successful
         else:
+            logger.info("Integration tests passed successfully!")
             print("\nIntegration tests passed successfully!")
     elif args.skip_tests and deployment_occurred:
+        logger.info("Deployment completed. Integration tests skipped (--skip-tests flag used).")
         print("\nDeployment completed. Integration tests skipped (--skip-tests flag used).")
     
     # If no main action was specified, show help
-    if not any([args.diff_confs, args.backup_conf, args.deploy_conf, args.test_only]):
-        print("No action specified. Use --diff-confs, --backup-conf, --deploy-conf, or --test-only.")
+    if not any([args.diff_confs, args.backup_conf, args.deploy_conf, args.test_only,
+                args.cs_decisions_list, args.cs_decisions_list_ip, args.cs_ban_ip, args.cs_unban_ip,
+                args.cs_bouncers_list, args.cs_hub_update, args.cs_test_connectivity,
+                args.cs_restart_lapi, args.cs_restart_bouncer]):
+        print("No action specified. Use --help for available options.")
         parser.print_help()
 
 def error_exit(message):
+    logger.error(message)
     print(f"Error: {message}", file=sys.stderr)
     sys.exit(1)
 
