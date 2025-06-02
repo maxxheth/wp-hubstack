@@ -18,6 +18,7 @@ DEFAULT_BACKUP_CONFIG = 'docker-compose.bak.yml'
 DEFAULT_DEBUG_LOG_FILE = 'debug.log'
 DEFAULT_DC_DEBUG_LOG_FILE = 'dc-debug.log'
 DEFAULT_TARGET_CONFIG = 'docker-compose.yml'
+DEFAULT_WP_DOCKER_CONT_DIR = '/var/opt'
 
 # Tarball configuration
 DEFAULT_CROWDSEC_TARBALLS_DIR = 'crowdsec_tarballs'

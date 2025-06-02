@@ -10,6 +10,7 @@ This script orchestrates various modules for:
 5. Integrated CrowdSec helper commands
 6. Safe label injection from partial configuration files
 7. Safe tarball extraction and deployment
+8. Dynamic container discovery and CrowdSec label injection
 """
 
 import argparse
@@ -50,6 +51,10 @@ from google_integration import (
     update_google_sheet_with_diff_log
 )
 from crowdsec_tester import run_crowdsec_integration_tests
+from container_discovery import (
+    ContainerDiscovery, DynamicLabelInjector, ContainerBasedTester,
+    discover_and_inject_crowdsec_labels
+)
 
 # ================================
 # MAIN FUNCTION
@@ -60,6 +65,15 @@ def main():
         description="Traefik Configuration Diff, Deployment, and CrowdSec Integration Test Tool.",
         formatter_class=argparse.RawTextHelpFormatter
     )
+
+    # --- Group: Container Discovery and Dynamic Label Injection ---
+    container_group = parser.add_argument_group('Container Discovery and Dynamic CrowdSec Label Injection')
+    container_group.add_argument('--discover-containers', action='store_true',
+                                 help="Discover running containers and inject CrowdSec bouncer labels.")
+    container_group.add_argument('--container-filter', default=r"^wp_",
+                                 help="Regex pattern to filter container names. Default: ^wp_")
+    container_group.add_argument('--test-discovered', action='store_true',
+                                 help="Run CrowdSec integration tests for discovered containers.")
 
     # --- Group: Label Injection ---
     label_group = parser.add_argument_group('Label Injection Options')
@@ -169,6 +183,49 @@ def main():
     # --- Handle Actions ---
     action_taken = False # Flag to track if any primary action was performed
 
+    # 0. Container Discovery and Dynamic Label Injection (new feature)
+    if args.discover_containers:
+        action_taken = True
+        logger_setup.logger.info("Starting container discovery and CrowdSec label injection...")
+        print("Discovering containers and injecting CrowdSec labels...")
+
+        success = discover_and_inject_crowdsec_labels(
+            filter_pattern=args.container_filter,
+            dry_run=args.dry_run
+        )
+        
+        if success:
+            logger_setup.logger.info("Container discovery and label injection completed successfully.")
+            print("Container discovery and label injection completed successfully.")
+            
+            # Test discovered containers if requested
+            if args.test_discovered and not args.skip_tests and not args.dry_run:
+                logger_setup.logger.info("Testing discovered containers...")
+                print("\nTesting discovered containers...")
+                
+                discovery = ContainerDiscovery(args.container_filter)
+                containers = discovery.discover_containers()
+                
+                if containers:
+                    tester = ContainerBasedTester(discovery)
+                    test_results = tester.test_discovered_containers(
+                        dry_run=args.dry_run,
+                        spreadsheet_id=args.spreadsheet_id,
+                        credentials_file=args.creds_file
+                    )
+                    
+                    passed_count = sum(1 for result in test_results.values() if result)
+                    total_count = len(test_results)
+                    
+                    logger_setup.logger.info(f"Container testing complete: {passed_count}/{total_count} passed")
+                    print(f"Container testing complete: {passed_count}/{total_count} containers passed tests")
+                else:
+                    logger_setup.logger.warning("No containers discovered for testing")
+                    print("No containers found for testing")
+        else:
+            logger_setup.logger.error("Container discovery and label injection failed.")
+            print("Container discovery and label injection failed.")
+
     # 1. List Tarballs (informational action)
     if args.list_tarballs:
         action_taken = True
@@ -191,6 +248,7 @@ def main():
         # If only listing tarballs, exit after showing the list
         if not (args.inject_tarballs or args.inject_labels or args.diff_confs or 
                 args.deploy_conf or args.backup_conf or args.test_only or 
+                args.discover_containers or
                 any(arg.startswith('--cs-') for arg in sys.argv)):
             sys.exit(0)
 
@@ -274,7 +332,8 @@ def main():
         # Helper commands usually stand alone. Exit after execution unless combined with other major ops.
         # For now, let's assume they are primary actions. If combined, this logic might change.
         # If a cs_helper was run, and no other major action like deploy/diff/inject, then exit.
-        if not (args.inject_labels or args.inject_tarballs or args.diff_confs or args.deploy_conf or args.backup_conf or args.test_only or args.list_tarballs):
+        if not (args.inject_labels or args.inject_tarballs or args.diff_confs or args.deploy_conf or 
+                args.backup_conf or args.test_only or args.list_tarballs or args.discover_containers):
             sys.exit(0)
 
     # 5. Test-Only Mode
@@ -362,7 +421,7 @@ def main():
             parser.print_help(sys.stderr)
             sys.exit(1)
         else: # Args were given, but none matched primary actions
-            print("No primary action specified or matched (e.g., --deploy-conf, --inject-labels, --inject-tarballs, --test-only, etc.).")
+            print("No primary action specified or matched (e.g., --deploy-conf, --inject-labels, --inject-tarballs, --discover-containers, --test-only, etc.).")
             print("Use --help for available options.")
             # Check if any CS helper was intended but missed due to logic
             # This part might be redundant if cs_helper_action logic is robust
