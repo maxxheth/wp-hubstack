@@ -1,0 +1,39 @@
+service:
+  traefik:
+    command:
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.address=http://bouncer-traefik:8080/api/v1/forwardAuth"
+      - "traefik.http.middlewares.crowdsec-bouncer.forwardauth.trustForwardHeader=true"
+  crowdsec:
+    image: docker.io/crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./crowdsec-conf:/etc/crowdsec"
+      - "./crowdsec-log:/var/log"
+      - "./crowdsec-data:/var/lib/crowdsec/data"
+      - "./traefik-log:/var/log/traefik"
+      - "/usr/bin/crowdsec:/usr/bin/crowdsec"
+      - "/usr/bin/cscli:/usr/bin/cscli"
+    ports:
+      - "6060:6060"  # CrowdSec API
+    environment:
+      - PATH=/usr/bin/crowdsec:/usr/bin/cscli:$PATH
+      - GID="${GID-1000}"
+      - COLLECTIONS=crowdsecurity/linux crowdsecurity/traefik crowdsecurity/http-cve crowdsecurity/whitelist-good-actors crowdsecurity/sshd
+    networks:
+      - web
+  bouncer-traefik:
+    image: fbonalair/traefik-crowdsec-bouncer:latest
+    container_name: crowdsec-bouncer
+    environment:
+      - PATH=/usr/bin/crowdsec:/usr/bin/cscli:$PATH
+      - CROWDSEC_BOUNCER_API_KEY=${CROWDSEC_BOUNCER_API_KEY}
+      - CROWDSEC_AGENT_HOST=crowdsec:8080  # CrowdSec agent URL
+      - PATH=/usr/bin/crowdsec:/usr/bin/cscli:$PATH
+      - CROWDSEC_BOUNCER_LOG_LEVEL=debug
+    volumes:
+      - ./crowdsec/bouncers:/etc/crowdsec/bouncers
+    depends_on:
+      - crowdsec
+    networks:
+      - web
