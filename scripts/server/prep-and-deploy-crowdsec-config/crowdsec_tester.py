@@ -9,6 +9,7 @@ import requests
 import urllib3 # For disabling SSL warnings if needed
 import subprocess
 import json
+import re
 from typing import Tuple, Dict, Optional, List
 
 from logger_setup import logger
@@ -26,6 +27,48 @@ from config import (
 # Disable SSL warnings for self-signed certificates in testing if VERIFY_SSL is False
 if not VERIFY_SSL:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# ================================
+# CONTAINER DISCOVERY
+# ================================
+
+def discover_containers(filter_pattern: str = r"^wp_") -> List[str]:
+    """
+    Discover running containers using docker ps and filter by pattern.
+    
+    Args:
+        filter_pattern: Regex pattern to filter container names
+        
+    Returns:
+        List of container names matching the filter
+    """
+    try:
+        # Run docker ps to get running containers
+        result = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        
+        all_containers = result.stdout.strip().split('\n')
+        if not all_containers or all_containers == ['']:
+            logger.warning("No running containers found")
+            return []
+        
+        # Filter containers by pattern
+        pattern = re.compile(filter_pattern)
+        filtered_containers = [name for name in all_containers if pattern.match(name)]
+        
+        logger.info(f"Discovered {len(filtered_containers)} containers matching pattern '{filter_pattern}': {filtered_containers}")
+        return filtered_containers
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to discover containers: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"Error during container discovery: {e}")
+        return []
 
 # ================================
 # DOCKER CONTAINER INSPECTION
@@ -61,7 +104,6 @@ def get_container_host_headers(container_name: str) -> List[str]:
                 # Extract Host() rules from Traefik labels
                 if "Host(" in label_value:
                     # Parse Host(`example.com`) or Host(`example.com`,`www.example.com`)
-                    import re
                     hosts = re.findall(r'Host\(`([^`]+)`\)', label_value)
                     host_headers.extend(hosts)
         
@@ -112,13 +154,15 @@ def _unban_test_ip() -> bool:
 # ================================
 
 def check_test_service_access(host_header: str, 
-                             custom_path: Optional[str] = None) -> Tuple[int, str]:
+                             custom_path: Optional[str] = None,
+                             simulate_ip: Optional[str] = None) -> Tuple[int, str]:
     """
-    Check access to the test service through Traefik.
+    Check access to the test service by making a request to the actual public URL.
     
     Args:
-        host_header: Host header for routing (required)
+        host_header: Host header for routing (the actual domain to test)
         custom_path: Override the default TEST_SERVICE_PATH
+        simulate_ip: IP to simulate via X-Forwarded-For header
         
     Returns:
         Tuple of (HTTP status code, response text snippet or error message).
@@ -126,21 +170,26 @@ def check_test_service_access(host_header: str,
     """
     service_path = custom_path or TEST_SERVICE_PATH
     
-    url = f"{TRAEFIK_SCHEME}://{TRAEFIK_HOST}:{TRAEFIK_PORT}{service_path}"
+    url = f"https://{host_header}{service_path}"
     headers = {
-        "Host": host_header,
-        "User-Agent": "CrowdSecIntegrationTester/1.3" # Updated version
+        "User-Agent": "CrowdSecIntegrationTester/1.4"
     }
+    
+    # Add X-Forwarded-For header to simulate requests from the banned IP
+    if simulate_ip:
+        headers["X-Forwarded-For"] = simulate_ip
+        headers["X-Real-IP"] = simulate_ip
 
-    logger.info(f"Making test request to URL: {url} with Host header: {host_header}")
+    logger.info(f"Making test request to public URL: {url}" + 
+                (f" (simulating IP: {simulate_ip})" if simulate_ip else ""))
 
     try:
         response = requests.get(
             url,
             headers=headers,
             timeout=REQUEST_TIMEOUT,
-            verify=VERIFY_SSL, # Use config for SSL verification
-            allow_redirects=False # Important for testing specific endpoint responses
+            verify=VERIFY_SSL,
+            allow_redirects=True
         )
         status_code = response.status_code
         # Get a snippet of the response text for logging, especially for errors
@@ -162,12 +211,13 @@ def check_test_service_access(host_header: str,
 # CONTAINER-SPECIFIC TESTING
 # ================================
 
-def check_container_service_access(container_name: str) -> List[Tuple[str, int, str]]:
+def check_container_service_access(container_name: str, simulate_ip: Optional[str] = None) -> List[Tuple[str, int, str]]:
     """
     Check access to a specific container's service through Traefik for all its host headers.
     
     Args:
         container_name: Name of the container to test
+        simulate_ip: IP to simulate for CrowdSec testing
         
     Returns:
         List of tuples: (host_header, status_code, response_snippet)
@@ -180,8 +230,9 @@ def check_container_service_access(container_name: str) -> List[Tuple[str, int, 
     
     results = []
     for host_header in host_headers:
-        logger.info(f"Testing container {container_name} with host header: {host_header}")
-        status_code, response_snippet = check_test_service_access(host_header)
+        sim_text = f" (simulating IP: {simulate_ip})" if simulate_ip else ""
+        logger.info(f"Testing container {container_name} with host header: {host_header}{sim_text}")
+        status_code, response_snippet = check_test_service_access(host_header, simulate_ip=simulate_ip)
         results.append((host_header, status_code, response_snippet))
     
     return results
@@ -286,8 +337,7 @@ def run_crowdsec_container_tests(container_name: str,
         results_step1 = check_container_service_access(container_name)
         passed_step1 = _print_test_step_result(f"Access Unrestricted ({container_name})",
                                               EXPECTED_STATUS_ALLOWED, results_step1, 1)
-        test_step_results.append((f"Step 1: Access Unrestricted ({container_name})", passed_step1))
-
+        
         if not passed_step1:
             logger.warning(f"Initial access test failed for {container_name}. This may indicate routing issues.")
 
@@ -298,12 +348,11 @@ def run_crowdsec_container_tests(container_name: str,
         if ban_initiated:
             time.sleep(BOUNCER_SYNC_DELAY_SECONDS)
             
-            # Test Step 2: Access blocked (ban active)
-            results_step2 = check_container_service_access(container_name)
+            # Test Step 2: Access blocked (ban active) - simulate requests from banned IP
+            results_step2 = check_container_service_access(container_name, simulate_ip=TEST_IP_TO_BAN)
             passed_step2 = _print_test_step_result(f"Access Blocked ({container_name})",
                                                   EXPECTED_STATUS_BLOCKED, results_step2, 2)
-            test_step_results.append((f"Step 2: Access Blocked ({container_name})", passed_step2))
-            
+        
             if not passed_step2:
                 logger.error(f"Block test failed for {container_name}")
                 if spreadsheet_id and credentials_file:
@@ -317,8 +366,8 @@ def run_crowdsec_container_tests(container_name: str,
         _unban_test_ip()
         time.sleep(BOUNCER_SYNC_DELAY_SECONDS)
 
-        # Test Step 3: Access restored (after unban)
-        results_step3 = check_container_service_access(container_name)
+        # Test Step 3: Access restored (after unban) - simulate requests from previously banned IP
+        results_step3 = check_container_service_access(container_name, simulate_ip=TEST_IP_TO_BAN)
         passed_step3 = _print_test_step_result(f"Access Restored ({container_name})",
                                               EXPECTED_STATUS_ALLOWED, results_step3, 3)
         test_step_results.append((f"Step 3: Access Restored ({container_name})", passed_step3))
@@ -358,7 +407,7 @@ def run_crowdsec_container_tests(container_name: str,
         logger.info(f"CrowdSec integration tests completed for {container_name}: {'PASSED' if all_passed else 'FAILED'}")
 
 # ================================
-# MAIN INTEGRATION TEST SUITE (Enhanced)
+# MAIN INTEGRATION TEST SUITE (Enhanced with auto-discovery)
 # ================================
 
 def run_crowdsec_integration_tests(
@@ -366,28 +415,33 @@ def run_crowdsec_integration_tests(
     # For logging failures to Google Sheets
     spreadsheet_id: str = "",
     credentials_file: str = "",
-    # Required: test specific containers by name
-    container_names: Optional[List[str]] = None
+    # Container discovery filter
+    container_filter: str = r"^wp_"
 ) -> bool:
     """
     Run the complete CrowdSec + Traefik bouncer integration test suite.
+    Auto-discovers containers using docker ps and the provided filter pattern.
     
     Args:
         dry_run: If True, simulate testing
         spreadsheet_id: Google Sheets ID for logging
         credentials_file: Google credentials file
-        container_names: List of container names to test (required)
+        container_filter: Regex pattern to filter container names for testing
         
     Returns:
         True if all tests passed, False otherwise
     """
-    if not container_names:
-        logger.error("No container names provided for testing")
-        print("ERROR: No container names provided for testing")
-        return False
+    # Auto-discover containers
+    container_names = discover_containers(container_filter)
     
-    # Test specific containers
-    logger.info(f"Running CrowdSec tests for {len(container_names)} containers: {container_names}")
+    if not container_names:
+        logger.warning(f"No containers found matching filter pattern '{container_filter}'")
+        print(f"No containers found matching filter pattern '{container_filter}'")
+        return True  # Return True since no containers to test is not a failure
+    
+    # Test discovered containers
+    logger.info(f"Running CrowdSec tests for {len(container_names)} discovered containers: {container_names}")
+    print(f"\nDiscovered {len(container_names)} containers for testing: {container_names}")
     
     all_results = []
     for container_name in container_names:
@@ -399,6 +453,23 @@ def run_crowdsec_integration_tests(
         )
         all_results.append(result)
     
+    # Overall results summary
+    passed_count = sum(1 for result in all_results if result)
+    total_count = len(all_results)
     overall_success = all(all_results)
-    logger.info(f"Container-specific CrowdSec tests completed. Overall result: {'PASSED' if overall_success else 'FAILED'}")
+    
+    summary_lines = [
+        "\n" + "="*70,
+        "OVERALL CROWDSEC INTEGRATION TEST SUMMARY",
+        "="*70,
+        f"  Containers Tested   : {total_count}",
+        f"  Containers Passed   : {passed_count}",
+        f"  Containers Failed   : {total_count - passed_count}",
+        f"  Overall Result      : {'PASSED' if overall_success else 'FAILED'}",
+        "="*70
+    ]
+    
+    print("\n".join(summary_lines))
+    logger.info(f"Container-specific CrowdSec tests completed. Overall result: {passed_count}/{total_count} passed ({'PASSED' if overall_success else 'FAILED'})")
+    
     return overall_success
