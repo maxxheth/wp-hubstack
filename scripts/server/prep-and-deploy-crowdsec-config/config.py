@@ -39,7 +39,9 @@ TEST_SERVICE_PATH = "/"  # Path to test endpoint
 CROWDSEC_LAPI_CONTAINER_NAME = "crowdsec"  # CrowdSec LAPI container name
 CROWDSEC_TRAEFIK_BOUNCER_CONTAINER_NAME = "crowdsec-bouncer"  # Traefik bouncer container
 TRAEFIK_CONTAINER_NAME = "traefik"  # Traefik container
-TEST_IP_TO_BAN = "1.2.3.4"  # IP address to ban/unban for testing
+# Use a test IP that we can safely ban without affecting real traffic
+# This should be an IP that's not used by your infrastructure
+TEST_IP_TO_BAN = "192.0.2.100"  # RFC 3330 test network, safe to use
 
 # Expected HTTP status codes
 EXPECTED_STATUS_ALLOWED = 200  # Status when access is allowed
@@ -50,7 +52,7 @@ BOUNCER_SYNC_DELAY_SECONDS = 15  # Wait time for bouncer to sync with LAPI
 
 # HTTP request settings
 REQUEST_TIMEOUT = 10  # Timeout for HTTP requests in seconds
-VERIFY_SSL = False  # Set to True for production HTTPS with valid certs
+VERIFY_SSL = True  # Set to True for production HTTPS with valid certs
 
 # --- Utility Functions for Config ---
 def sanitize_sheet_name(name: str) -> str:
